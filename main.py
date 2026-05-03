@@ -15,7 +15,7 @@ ALLOWED_ROLES = ["Modérateur"]
 # ============================================================
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash-latest")
+model = genai.GenerativeModel("gemini-pro")
 
 intents = discord.Intents.default()
 intents.message_content = True

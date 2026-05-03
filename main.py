@@ -809,7 +809,36 @@ async def send_help(channel):
     channel_name = channel.name.lower().replace("・", "")
     embed = discord.Embed(color=0x3498db, timestamp=datetime.now(timezone.utc))
 
-    if "modération" in channel_name or "moderation" in channel_name:
+    if "jeux" in channel_name:
+        embed.title = "📖 Commandes — 🎮・jeux"
+        embed.description = (
+            "**Profil & Stats**\n"
+            "`!profil` — voir ton niveau, pièces, rôles équipés\n"
+            "`!inventaire` — voir tous tes rôles achetés\n"
+            "`!classement` — top des membres les plus actifs\n\n"
+            "**Boutique & Gacha**\n"
+            "`!boutique` — voir la boutique standard et rotative\n"
+            "`!acheter [nom]` — acheter un article\n"
+            "`!équiper [nom]` — équiper un rôle\n"
+            "`!spin` — tenter le gacha (50 pièces)\n\n"
+            "**Social**\n"
+            "`!parrainer @pseudo` — parrainer un ami\n"
+            "`!abonner #salon` — s'abonner aux notifs d'un salon\n"
+            "`!désabonner #salon` — se désabonner\n\n"
+            "💡 Pour ta récompense quotidienne, va dans 🎁・daily et tape `!daily`"
+        )
+    elif "daily" in channel_name:
+        embed.title = "📖 Commandes — 🎁・daily"
+        embed.description = (
+            "`!daily` — récupère ta récompense quotidienne\n\n"
+            "🔥 **Streak bonus :**\n"
+            "3 jours de suite → x1.5\n"
+            "7 jours de suite → x2\n"
+            "14 jours de suite → x2.5\n"
+            "30 jours de suite → x3\n\n"
+            "⚠️ Si tu rates un jour, ton streak repart à 0 !"
+        )
+    elif "modération" in channel_name or "moderation" in channel_name:
         embed.title = "📖 Commandes — Modération"
         embed.description = (
             "Tu peux écrire en **langage naturel** :\n\n"

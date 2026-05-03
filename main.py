@@ -17,6 +17,7 @@ ai_client = OpenAI(
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+intents.reactions = True
 
 client = discord.Client(intents=intents)
 pending_actions = {}
@@ -106,6 +107,22 @@ async def on_ready():
     print(f"✅ Bot connecté en tant que {client.user}")
 
 @client.event
+async def on_reaction_add(reaction, user):
+    if user.bot:
+        return
+    if reaction.message.id not in pending_actions:
+        return
+    action_data, requester_id = pending_actions[reaction.message.id]
+    if user.id != requester_id:
+        return
+    if str(reaction.emoji) == "✅":
+        pending_actions.pop(reaction.message.id)
+        await execute_action(reaction.message.guild, action_data, reaction.message.channel)
+    elif str(reaction.emoji) == "❌":
+        pending_actions.pop(reaction.message.id)
+        await reaction.message.channel.send("❌ Action annulée.")
+
+@client.event
 async def on_message(message):
     if message.author.bot:
         return
@@ -114,16 +131,6 @@ async def on_message(message):
         return
     if not has_permission(message.author):
         await message.channel.send("❌ Tu n'as pas la permission d'utiliser le bot de modération.")
-        return
-    if message.content.strip() in ["✅", "oui", "yes", "confirme", "ok"]:
-        action_data = pending_actions.pop(message.author.id, None)
-        if action_data:
-            await execute_action(message.guild, action_data, message.channel)
-        return
-    if message.content.strip() in ["❌", "non", "no", "annule", "cancel"]:
-        if message.author.id in pending_actions:
-            pending_actions.pop(message.author.id)
-            await message.channel.send("❌ Action annulée.")
         return
 
     async with message.channel.typing():
@@ -150,14 +157,17 @@ async def on_message(message):
         return
 
     confirm_msg = action_data.get("confirmation_message", "Action de modération détectée.")
-    await message.channel.send(
-        f"⚠️ **Confirmation requise**\n{confirm_msg}\n\nRéponds ✅ pour confirmer ou ❌ pour annuler."
+    bot_msg = await message.channel.send(
+        f"⚠️ **Confirmation requise**\n{confirm_msg}\n\nRéagis ✅ pour confirmer ou ❌ pour annuler."
     )
-    pending_actions[message.author.id] = action_data
+    await bot_msg.add_reaction("✅")
+    await bot_msg.add_reaction("❌")
+
+    pending_actions[bot_msg.id] = (action_data, message.author.id)
 
     await asyncio.sleep(30)
-    if message.author.id in pending_actions:
-        pending_actions.pop(message.author.id)
+    if bot_msg.id in pending_actions:
+        pending_actions.pop(bot_msg.id)
         await message.channel.send("⏱️ Confirmation expirée, action annulée.")
 
 client.run(DISCORD_TOKEN)

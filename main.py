@@ -196,7 +196,7 @@ async def find_member(guild, description, channel):
 async def reformulate_reason(raw_reason):
     try:
         r = ai_client.chat.completions.create(
-            model="openrouter/free",
+            model="google/gemma-3-4b-it:free",
             messages=[{"role": "user", "content": f"{REASON_PROMPT}\n\nRaison brute : {raw_reason}"}]
         )
         return r.choices[0].message.content.strip()
@@ -470,7 +470,7 @@ async def analyze_member_messages(guild, member):
         msgs_text = "\n".join([f"- {m.content}" for m in messages[:50] if m.content])
         try:
             r = ai_client.chat.completions.create(
-                model="openrouter/free",
+                model="google/gemma-3-4b-it:free",
                 messages=[{"role": "user", "content": f"{ANALYSIS_PROMPT}\n\nMessages :\n{msgs_text}"}]
             )
             ai_analysis = r.choices[0].message.content.strip()
@@ -1070,7 +1070,7 @@ async def on_message(message):
     async with message.channel.typing():
         try:
             r = ai_client.chat.completions.create(
-                model="openrouter/free",
+                model="google/gemma-3-4b-it:free",
                 messages=[{"role": "user", "content": f"{SYSTEM_PROMPT}\n\nMessage du modérateur: {message.content}"}]
             )
             raw = r.choices[0].message.content.strip()

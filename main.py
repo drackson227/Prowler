@@ -44,6 +44,26 @@ Si la cible n'est pas claire, mets needs_clarification à true et pose une quest
 Si aucune action de modération n'est détectée, mets action à "none".
 """
 
+ACTION_COLORS = {
+    "ban": 0xe74c3c,
+    "kick": 0xe67e22,
+    "mute": 0xf39c12,
+    "unmute": 0x2ecc71,
+    "unban": 0x2ecc71,
+    "warn": 0xf1c40f,
+    "delete_messages": 0x9b59b6,
+}
+
+ACTION_LABELS = {
+    "ban": "🔨 Bannissement",
+    "kick": "👢 Kick",
+    "mute": "🔇 Mute",
+    "unmute": "🔊 Demute",
+    "unban": "✅ Déban",
+    "warn": "⚠️ Avertissement",
+    "delete_messages": "🗑️ Suppression de messages",
+}
+
 def has_permission(member):
     if member.guild.owner_id == member.id:
         return True
@@ -69,33 +89,34 @@ async def execute_action(guild, action_data, mod_channel):
     target_desc = action_data.get("target", "")
     member = await find_member(guild, target_desc, mod_channel)
     if not member:
-        await mod_channel.send(f"❌ Impossible de trouver l'utilisateur : **{target_desc}**")
+        embed = discord.Embed(
+            title="❌ Utilisateur introuvable",
+            description=f"Impossible de trouver : **{target_desc}**",
+            color=0xe74c3c
+        )
+        await mod_channel.send(embed=embed)
         return
+
     action = action_data.get("action")
     reason = action_data.get("reason", "Aucune raison spécifiée")
+
     try:
         if action == "ban":
             await member.ban(reason=reason)
-            await mod_channel.send(f"✅ **{member.display_name}** a été banni. Raison : {reason}")
         elif action == "kick":
             await member.kick(reason=reason)
-            await mod_channel.send(f"✅ **{member.display_name}** a été kické. Raison : {reason}")
         elif action == "mute":
             duration = action_data.get("duration_minutes") or 10
             await member.timeout(timedelta(minutes=duration), reason=reason)
-            await mod_channel.send(f"✅ **{member.display_name}** a été mute pour {duration} minutes. Raison : {reason}")
         elif action == "unmute":
             await member.timeout(None)
-            await mod_channel.send(f"✅ **{member.display_name}** a été demute.")
         elif action == "unban":
             await guild.unban(member)
-            await mod_channel.send(f"✅ **{member.display_name}** a été débanni.")
         elif action == "warn":
             try:
                 await member.send(f"⚠️ Tu as reçu un avertissement sur **{guild.name}** : {reason}")
             except:
                 pass
-            await mod_channel.send(f"✅ **{member.display_name}** a été averti. Raison : {reason}")
         elif action == "delete_messages":
             count = action_data.get("count") or 10
             deleted = 0
@@ -103,36 +124,58 @@ async def execute_action(guild, action_data, mod_channel):
                 if msg.author == member and deleted < count:
                     await msg.delete()
                     deleted += 1
-            await mod_channel.send(f"✅ {deleted} messages de **{member.display_name}** supprimés.")
+
+        color = 0x2ecc71 if action in ["unmute", "unban"] else ACTION_COLORS.get(action, 0x2ecc71)
+        label = ACTION_LABELS.get(action, action)
+        duration = action_data.get("duration_minutes")
+
+        embed = discord.Embed(title=f"✅ Action effectuée — {label}", color=color)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="Utilisateur", value=f"{member.mention}", inline=True)
+        if duration and action == "mute":
+            embed.add_field(name="Durée", value=f"{duration} minutes", inline=True)
+        if action not in ["unmute", "unban"]:
+            embed.add_field(name="Raison", value=reason, inline=False)
+        embed.set_footer(text=f"ID : {member.id}")
+        await mod_channel.send(embed=embed)
+
     except discord.Forbidden:
-        await mod_channel.send(f"❌ Je n'ai pas les permissions pour faire ça sur **{member.display_name}**.")
+        embed = discord.Embed(
+            title="❌ Permission refusée",
+            description=f"Je n'ai pas les permissions pour agir sur **{member.display_name}**.",
+            color=0xe74c3c
+        )
+        await mod_channel.send(embed=embed)
     except Exception as e:
         await mod_channel.send(f"❌ Erreur : {e}")
 
-async def send_confirmation(channel, action_data, author_id):
+async def send_confirmation(channel, action_data, author_id, member=None):
     action = action_data.get("action")
     target = action_data.get("target", "?")
     duration = action_data.get("duration_minutes")
-
-    action_labels = {
-        "ban": "🔨 Bannir",
-        "kick": "👢 Kicker",
-        "mute": "🔇 Mute",
-        "unmute": "🔊 Demute",
-        "unban": "✅ Débannir",
-        "warn": "⚠️ Avertir",
-        "delete_messages": "🗑️ Supprimer les messages de"
-    }
-    label = action_labels.get(action, action)
-    duration_txt = f" pendant **{duration} minutes**" if duration else ""
     reason = action_data.get("reason")
-    reason_txt = f"\nRaison : {reason}" if reason else ""
 
-    bot_msg = await channel.send(
-        f"⚠️ **Confirmation requise**\n"
-        f"Action : {label} **{target}**{duration_txt}{reason_txt}\n\n"
-        f"✅ pour confirmer — ❌ pour annuler"
+    label = ACTION_LABELS.get(action, action)
+    color = ACTION_COLORS.get(action, 0xf39c12)
+
+    embed = discord.Embed(
+        title=f"⚠️ Confirmation requise — {label}",
+        color=color
     )
+    if member:
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="Utilisateur", value=f"{member.mention}", inline=True)
+    else:
+        embed.add_field(name="Cible", value=f"**{target}**", inline=True)
+
+    if duration:
+        embed.add_field(name="Durée", value=f"{duration} minutes", inline=True)
+    if reason:
+        embed.add_field(name="Raison", value=reason, inline=False)
+
+    embed.set_footer(text="Réagis ✅ pour confirmer ou ❌ pour annuler • Expire dans 30s")
+
+    bot_msg = await channel.send(embed=embed)
     await bot_msg.add_reaction("✅")
     await bot_msg.add_reaction("❌")
     pending_actions[bot_msg.id] = (action_data, author_id)
@@ -140,7 +183,12 @@ async def send_confirmation(channel, action_data, author_id):
     await asyncio.sleep(30)
     if bot_msg.id in pending_actions:
         pending_actions.pop(bot_msg.id)
-        await channel.send("⏱️ Confirmation expirée, action annulée.")
+        expired_embed = discord.Embed(
+            title="⏱️ Confirmation expirée",
+            description="L'action a été annulée automatiquement.",
+            color=0x95a5a6
+        )
+        await channel.send(embed=expired_embed)
 
 @client.event
 async def on_ready():
@@ -160,7 +208,11 @@ async def on_reaction_add(reaction, user):
         await execute_action(reaction.message.guild, action_data, reaction.message.channel)
     elif str(reaction.emoji) == "❌":
         pending_actions.pop(reaction.message.id)
-        await reaction.message.channel.send("❌ Action annulée.")
+        cancelled_embed = discord.Embed(
+            title="❌ Action annulée",
+            color=0x95a5a6
+        )
+        await reaction.message.channel.send(embed=cancelled_embed)
 
 @client.event
 async def on_message(message):
@@ -170,13 +222,19 @@ async def on_message(message):
     if "modération" not in channel_name and "moderation" not in channel_name:
         return
     if not has_permission(message.author):
-        await message.channel.send("❌ Tu n'as pas la permission d'utiliser le bot de modération.")
+        embed = discord.Embed(
+            title="❌ Permission refusée",
+            description="Tu n'as pas la permission d'utiliser le bot de modération.",
+            color=0xe74c3c
+        )
+        await message.channel.send(embed=embed)
         return
 
     if message.author.id in waiting_for_reason:
         action_data = waiting_for_reason.pop(message.author.id)
         action_data["reason"] = message.content
-        await send_confirmation(message.channel, action_data, message.author.id)
+        member = await find_member(message.guild, action_data.get("target", ""), message.channel)
+        await send_confirmation(message.channel, action_data, message.author.id, member=member)
         return
 
     async with message.channel.typing():
@@ -203,9 +261,15 @@ async def on_message(message):
         return
 
     if action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
-        await message.channel.send("📝 **Quelle est la raison de cette sanction ?**")
+        embed = discord.Embed(
+            title="📝 Raison de la sanction",
+            description="Quelle est la raison de cette sanction ?",
+            color=0x3498db
+        )
+        await message.channel.send(embed=embed)
         waiting_for_reason[message.author.id] = action_data
     else:
-        await send_confirmation(message.channel, action_data, message.author.id)
+        member = await find_member(message.guild, action_data.get("target", ""), message.channel)
+        await send_confirmation(message.channel, action_data, message.author.id, member=member)
 
 client.run(DISCORD_TOKEN)

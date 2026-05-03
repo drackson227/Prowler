@@ -6,16 +6,16 @@ import asyncio
 from datetime import timedelta
 
 # ============================================================
-# CONFIG — Remplace ces valeurs par les tiennes
+# CONFIG
 # ============================================================
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 MODERATION_CHANNEL = "⚠️・modération"
-ALLOWED_ROLES = ["Modérateur"]  # + le propriétaire du serveur
+ALLOWED_ROLES = ["Modérateur"]
 # ============================================================
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel("gemini-2.0-flash")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -23,7 +23,7 @@ intents.members = True
 
 client = discord.Client(intents=intents)
 
-pending_actions = {}  # Stocke les actions en attente de confirmation
+pending_actions = {}
 
 SYSTEM_PROMPT = """Tu es un assistant de modération Discord. 
 À partir d'un message en langage naturel, tu dois extraire l'action de modération voulue et retourner un JSON.
@@ -52,8 +52,6 @@ def has_permission(member):
     return any(role.name in ALLOWED_ROLES for role in member.roles)
 
 async def find_member(guild, description, channel):
-    """Cherche un membre par mention, nom, ou 'le dernier à avoir dit X'"""
-    # Mention directe
     if description.startswith("<@") and description.endswith(">"):
         uid = description.strip("<@!>")
         try:
@@ -61,13 +59,11 @@ async def find_member(guild, description, channel):
         except:
             return None
 
-    # Chercher par nom
     description_lower = description.lower()
     for member in guild.members:
         if description_lower in member.display_name.lower() or description_lower in member.name.lower():
             return member
 
-    # Chercher dans les derniers messages du channel
     async for msg in channel.history(limit=50):
         if description_lower in msg.content.lower() and not msg.author.bot:
             return msg.author
@@ -129,20 +125,14 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    # Vérifie que c'est le bon salon
-    if message.channel.name != MODERATION_CHANNEL.lstrip("⚠️・").strip() and message.channel.name != MODERATION_CHANNEL:
-        # Comparaison flexible
-        channel_clean = MODERATION_CHANNEL.replace("⚠️・", "").replace("・", "-").strip()
-        msg_channel = message.channel.name.replace("⚠️・", "").replace("・", "-").strip()
-        if channel_clean not in msg_channel and msg_channel not in channel_clean:
-            return
+    channel_name = message.channel.name
+    if "modération" not in channel_name and "moderation" not in channel_name:
+        return
 
-    # Vérifie les permissions
     if not has_permission(message.author):
         await message.channel.send("❌ Tu n'as pas la permission d'utiliser le bot de modération.")
         return
 
-    # Gestion des confirmations (✅ ou ❌)
     if message.content.strip() in ["✅", "oui", "yes", "confirme", "ok"]:
         action_data = pending_actions.pop(message.author.id, None)
         if action_data:
@@ -155,7 +145,6 @@ async def on_message(message):
             await message.channel.send("❌ Action annulée.")
         return
 
-    # Analyse le message avec Gemini
     async with message.channel.typing():
         try:
             response = model.generate_content(
@@ -163,7 +152,6 @@ async def on_message(message):
             )
             raw = response.text.strip()
 
-            # Nettoie le JSON si besoin
             if raw.startswith("```"):
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
@@ -177,20 +165,18 @@ async def on_message(message):
             return
 
     if action_data.get("action") == "none":
-        return  # Pas d'action, on ignore
+        return
 
     if action_data.get("needs_clarification"):
         await message.channel.send(f"❓ {action_data.get('clarification_question')}")
         return
 
-    # Message de confirmation
     confirm_msg = action_data.get("confirmation_message", "Action de modération détectée.")
     await message.channel.send(
         f"⚠️ **Confirmation requise**\n{confirm_msg}\n\nRéponds ✅ pour confirmer ou ❌ pour annuler."
     )
     pending_actions[message.author.id] = action_data
 
-    # Timeout auto après 30 secondes
     await asyncio.sleep(30)
     if message.author.id in pending_actions:
         pending_actions.pop(message.author.id)

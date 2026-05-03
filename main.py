@@ -972,7 +972,10 @@ async def on_reaction_add(reaction, user):
             if idx < len(candidates):
                 waiting_for_member_choice.pop(msg_id)
                 action_data["resolved_member"] = candidates[idx]
-                await ask_action_choice(reaction.message.channel, candidates[idx], action_data, requester_id)
+                if action_data.get("action") == "show_profile":
+                    await show_profile(reaction.message.channel, candidates[idx], reaction.message.guild)
+                else:
+                    await ask_action_choice(reaction.message.channel, candidates[idx], action_data, requester_id)
         return
 
     # --- Confirmation d'action ---

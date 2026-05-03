@@ -833,12 +833,9 @@ async def send_help(channel):
     else:
         embed.title = "📖 Aide — Prowler Bot"
         embed.description = (
-            "**Salons du bot :**\n"
-            "⚠️・modération — commandes de modération\n"
-            "📋・logs — historique des actions\n"
-            "📝・rapport-prowler — rapport quotidien à 22h\n"
-            "💬・chat-général — messages de bienvenue\n\n"
-            "Tape `!help` dans le bon salon pour plus de détails."
+            "**Commandes disponibles :**\n"
+            "🎮 Va dans le bon salon pour utiliser les commandes !\n\n"
+            "Tape `!help` ou `?help` dans n'importe quel salon pour plus de détails."
         )
     embed.set_footer(text="Prowler Bot")
     await channel.send(embed=embed)

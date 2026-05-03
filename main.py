@@ -26,16 +26,16 @@ waiting_for_reason = {}
 SYSTEM_PROMPT = """Tu es un assistant de modération Discord. 
 À partir d'un message en langage naturel, tu dois extraire l'action de modération voulue et retourner un JSON.
 
-Actions possibles: ban, kick, mute, warn, delete_messages, none
+Actions possibles: ban, kick, mute, warn, delete_messages, unmute, unban
 
 Format de réponse JSON uniquement (pas de texte autour) :
 {
-  "action": "ban|kick|mute|warn|delete_messages|none",
+  "action": "ban|kick|mute|warn|delete_messages|unmute|unban|none",
   "target": "mention ou description de l'utilisateur ciblé",
   "duration_minutes": null ou nombre (pour mute),
   "count": null ou nombre (pour delete_messages),
   "reason": null,
-  "confirmation_message": "Message lisible expliquant ce que tu vas faire (sans mentionner la raison)",
+  "confirmation_message": "Message lisible expliquant ce que tu vas faire",
   "needs_clarification": false,
   "clarification_question": null
 }
@@ -84,6 +84,12 @@ async def execute_action(guild, action_data, mod_channel):
             duration = action_data.get("duration_minutes") or 10
             await member.timeout(timedelta(minutes=duration), reason=reason)
             await mod_channel.send(f"✅ **{member.display_name}** a été mute pour {duration} minutes. Raison : {reason}")
+        elif action == "unmute":
+            await member.timeout(None)
+            await mod_channel.send(f"✅ **{member.display_name}** a été demute.")
+        elif action == "unban":
+            await guild.unban(member)
+            await mod_channel.send(f"✅ **{member.display_name}** a été débanni.")
         elif action == "warn":
             try:
                 await member.send(f"⚠️ Tu as reçu un avertissement sur **{guild.name}** : {reason}")
@@ -112,18 +118,19 @@ async def send_confirmation(channel, action_data, author_id):
         "ban": "🔨 Bannir",
         "kick": "👢 Kicker",
         "mute": "🔇 Mute",
+        "unmute": "🔊 Demute",
+        "unban": "✅ Débannir",
         "warn": "⚠️ Avertir",
         "delete_messages": "🗑️ Supprimer les messages de"
     }
     label = action_labels.get(action, action)
     duration_txt = f" pendant **{duration} minutes**" if duration else ""
-
-    reason = action_data.get("reason", "Aucune raison spécifiée")
+    reason = action_data.get("reason")
+    reason_txt = f"\nRaison : {reason}" if reason else ""
 
     bot_msg = await channel.send(
         f"⚠️ **Confirmation requise**\n"
-        f"Action : {label} **{target}**{duration_txt}\n"
-        f"Raison : {reason}\n\n"
+        f"Action : {label} **{target}**{duration_txt}{reason_txt}\n\n"
         f"✅ pour confirmer — ❌ pour annuler"
     )
     await bot_msg.add_reaction("✅")
@@ -166,7 +173,6 @@ async def on_message(message):
         await message.channel.send("❌ Tu n'as pas la permission d'utiliser le bot de modération.")
         return
 
-    # Si on attend la raison de ce modérateur
     if message.author.id in waiting_for_reason:
         action_data = waiting_for_reason.pop(message.author.id)
         action_data["reason"] = message.content
@@ -176,7 +182,7 @@ async def on_message(message):
     async with message.channel.typing():
         try:
             response = ai_client.chat.completions.create(
-                model="openrouter/free",
+                model="google/gemma-3-27b-it:free",
                 messages=[{"role": "user", "content": f"{SYSTEM_PROMPT}\n\nMessage du modérateur: {message.content}"}]
             )
             raw = response.choices[0].message.content.strip()
@@ -196,7 +202,6 @@ async def on_message(message):
         await message.channel.send(f"❓ {action_data.get('clarification_question')}")
         return
 
-    # Demander la raison seulement pour les sanctions
     if action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
         await message.channel.send("📝 **Quelle est la raison de cette sanction ?**")
         waiting_for_reason[message.author.id] = action_data

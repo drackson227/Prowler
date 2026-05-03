@@ -1565,7 +1565,17 @@ async def on_message(message):
             return
 
     if action_data.get("action") == "none":
+        # Même si "none", vérifier si c'est un pseudo tapé seul
+        target = action_data.get("target", "")
+        if target:
+            exact, similar, is_id, is_banned = await find_member(message.guild, target, message.channel)
+            all_candidates = exact + similar
+            if all_candidates:
+                action_data["action"] = "show_profile"
+                action_data["resolved_member"] = all_candidates[0]
+                await ask_action_choice(message.channel, all_candidates[0], action_data, message.author.id)
         return
+
     if action_data.get("action") == "show_profile" and not action_data.get("target"):
         await message.channel.send("❓ De quel membre veux-tu voir le profil ?")
         return
@@ -1574,15 +1584,6 @@ async def on_message(message):
         return
 
     exact, similar, is_id, is_banned = await find_member(message.guild, action_data.get("target", ""), message.channel)
-
-    # BUG FIX: Si pseudo seul détecté (action = none ou autre) et membre trouvé → proposer le choix
-    if action_data.get("action") == "none" and (exact or similar):
-        all_candidates = exact + similar
-        action_data["action"] = "show_profile"  # action par défaut pour le choix
-        action_data["resolved_member"] = all_candidates[0]
-        await ask_action_choice(message.channel, all_candidates[0], action_data, message.author.id)
-        return
-
     await handle_member_resolution(message.channel, action_data, message.author.id, exact, similar, is_id, is_banned)
 
 client.run(DISCORD_TOKEN)

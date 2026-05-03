@@ -304,11 +304,14 @@ def find_similar_members(guild, description):
         name_lower = member.display_name.lower()
         username_lower = member.name.lower()
         score = max(similarity(description_lower, name_lower), similarity(description_lower, username_lower))
-        if score == 1.0 and (description_lower in [name_lower, username_lower]):
+        # Exact = le pseudo tapé correspond exactement
+        if description_lower in [name_lower, username_lower]:
             exact.append(member)
-        elif score >= 0.5:
+        # Similaire = le pseudo tapé est contenu dans le pseudo OU score >= 0.4
+        elif description_lower in name_lower or description_lower in username_lower or score >= 0.4:
             similar.append((score, member))
     similar.sort(key=lambda x: x[0], reverse=True)
+    # Retirer les doublons avec exact
     return exact, [m for _, m in similar if m not in exact][:5]
 
 async def find_member(guild, description, channel):
@@ -1034,20 +1037,13 @@ async def handle_member_resolution(channel, action_data, author_id, exact, simil
             await send_confirmation(channel, action_data, author_id)
         return
 
-    if len(exact) == 1 and not similar:
-        action_data["resolved_member"] = exact[0]
-        if action_data.get("action") == "show_profile":
-            await show_profile(channel, exact[0], exact[0].guild)
-            return
-        await ask_action_choice(channel, exact[0], action_data, author_id)
-        return
-
+    # Un seul candidat au total → confirmation simple "voulais-tu dire X ?"
     if len(all_candidates) == 1:
         action_data["resolved_member"] = all_candidates[0]
         m = all_candidates[0]
         embed = discord.Embed(
-            title="🔍 Membre similaire trouvé",
-            description=f"Voulais-tu dire **{m.display_name}** ?",
+            title="🔍 Membre trouvé",
+            description=f"Voulais-tu dire **{m.display_name}** (`{m.name}`) ?",
             color=0xf39c12
         )
         embed.set_thumbnail(url=m.display_avatar.url)
@@ -1058,6 +1054,7 @@ async def handle_member_resolution(channel, action_data, author_id, exact, simil
         waiting_for_member_choice[bot_msg.id] = (action_data, author_id, [m])
         return
 
+    # Plusieurs candidats → toujours afficher la liste numérotée pour choisir
     await ask_member_choice(channel, action_data, author_id, all_candidates)
 
 # ============================================================

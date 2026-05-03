@@ -21,6 +21,7 @@ intents.reactions = True
 
 client = discord.Client(intents=intents)
 pending_actions = {}
+waiting_for_reason = {}
 
 SYSTEM_PROMPT = """Tu es un assistant de modération Discord. 
 À partir d'un message en langage naturel, tu dois extraire l'action de modération voulue et retourner un JSON.
@@ -33,8 +34,8 @@ Format de réponse JSON uniquement (pas de texte autour) :
   "target": "mention ou description de l'utilisateur ciblé",
   "duration_minutes": null ou nombre (pour mute),
   "count": null ou nombre (pour delete_messages),
-  "reason": "raison de la sanction",
-  "confirmation_message": "Message lisible expliquant ce que tu vas faire",
+  "reason": null,
+  "confirmation_message": "Message lisible expliquant ce que tu vas faire (sans mentionner la raison)",
   "needs_clarification": false,
   "clarification_question": null
 }
@@ -102,6 +103,38 @@ async def execute_action(guild, action_data, mod_channel):
     except Exception as e:
         await mod_channel.send(f"❌ Erreur : {e}")
 
+async def send_confirmation(channel, action_data, author_id):
+    action = action_data.get("action")
+    target = action_data.get("target", "?")
+    duration = action_data.get("duration_minutes")
+
+    action_labels = {
+        "ban": "🔨 Bannir",
+        "kick": "👢 Kicker",
+        "mute": "🔇 Mute",
+        "warn": "⚠️ Avertir",
+        "delete_messages": "🗑️ Supprimer les messages de"
+    }
+    label = action_labels.get(action, action)
+    duration_txt = f" pendant **{duration} minutes**" if duration else ""
+
+    reason = action_data.get("reason", "Aucune raison spécifiée")
+
+    bot_msg = await channel.send(
+        f"⚠️ **Confirmation requise**\n"
+        f"Action : {label} **{target}**{duration_txt}\n"
+        f"Raison : {reason}\n\n"
+        f"✅ pour confirmer — ❌ pour annuler"
+    )
+    await bot_msg.add_reaction("✅")
+    await bot_msg.add_reaction("❌")
+    pending_actions[bot_msg.id] = (action_data, author_id)
+
+    await asyncio.sleep(30)
+    if bot_msg.id in pending_actions:
+        pending_actions.pop(bot_msg.id)
+        await channel.send("⏱️ Confirmation expirée, action annulée.")
+
 @client.event
 async def on_ready():
     print(f"✅ Bot connecté en tant que {client.user}")
@@ -133,6 +166,13 @@ async def on_message(message):
         await message.channel.send("❌ Tu n'as pas la permission d'utiliser le bot de modération.")
         return
 
+    # Si on attend la raison de ce modérateur
+    if message.author.id in waiting_for_reason:
+        action_data = waiting_for_reason.pop(message.author.id)
+        action_data["reason"] = message.content
+        await send_confirmation(message.channel, action_data, message.author.id)
+        return
+
     async with message.channel.typing():
         try:
             response = ai_client.chat.completions.create(
@@ -156,18 +196,8 @@ async def on_message(message):
         await message.channel.send(f"❓ {action_data.get('clarification_question')}")
         return
 
-    confirm_msg = action_data.get("confirmation_message", "Action de modération détectée.")
-    bot_msg = await message.channel.send(
-        f"⚠️ **Confirmation requise**\n{confirm_msg}\n\nRéagis ✅ pour confirmer ou ❌ pour annuler."
-    )
-    await bot_msg.add_reaction("✅")
-    await bot_msg.add_reaction("❌")
-
-    pending_actions[bot_msg.id] = (action_data, message.author.id)
-
-    await asyncio.sleep(30)
-    if bot_msg.id in pending_actions:
-        pending_actions.pop(bot_msg.id)
-        await message.channel.send("⏱️ Confirmation expirée, action annulée.")
+    # Demander la raison
+    await message.channel.send("📝 **Quelle est la raison de cette sanction ?**")
+    waiting_for_reason[message.author.id] = action_data
 
 client.run(DISCORD_TOKEN)

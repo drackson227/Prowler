@@ -18,16 +18,16 @@ MOD_CHANNEL = "modération"
 LOG_CHANNEL = "📋・logs"
 GENERAL_CHANNEL = "💬・chat-général"
 REPORT_CHANNEL = "📝・rapport-prowler"
-REPORT_HOUR = 22  # heure du rapport quotidien (UTC+0, ajuste si besoin)
+REPORT_HOUR = 22
 
 ROLE_MEMBRE = "Membre"
 ROLE_MEMBRE_ACTIF = "Membre Actif"
-ACTIVE_MESSAGES_PER_DAY = 10       # messages/jour minimum pour être actif
-ACTIVE_DAYS_REQUIRED = 2           # jours consécutifs
-INACTIVE_DAYS_REQUIRED = 2         # jours sans messages pour perdre le rôle
+ACTIVE_MESSAGES_PER_DAY = 10
+ACTIVE_DAYS_REQUIRED = 2
+INACTIVE_DAYS_REQUIRED = 2
 
-SPAM_THRESHOLD = 10                # nb de messages identiques
-SPAM_WINDOW = 30                   # secondes
+SPAM_THRESHOLD = 10
+SPAM_WINDOW = 30
 # ============================================================
 
 ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
@@ -40,13 +40,13 @@ intents.reactions = True
 client = discord.Client(intents=intents)
 
 # ---------- états en mémoire ----------
-pending_actions = {}          # msg_id → (action_data, author_id)
-waiting_for_reason = {}       # author_id → action_data
-waiting_for_member_choice = {}# msg_id → (action_data, author_id, candidates)
-waiting_for_action_choice = {}# msg_id → (member, action_data, author_id)
-waiting_for_comment = {}      # author_id → (member_id, "add"|"remove", comment_idx)
-spam_tracker = {}             # member_id → {content: str, times: [timestamps]}
-member_message_days = {}      # member_id → {date_str: count}
+pending_actions = {}
+waiting_for_reason = {}
+waiting_for_member_choice = {}
+waiting_for_action_choice = {}
+waiting_for_comment = {}
+spam_tracker = {}
+member_message_days = {}
 
 # ---------- DB JSON simple ----------
 DB_FILE = "db.json"
@@ -165,7 +165,6 @@ def find_similar_members(guild, description):
     return exact, [m for _, m in similar if m not in exact][:5]
 
 async def find_member(guild, description, channel):
-    # Retourne (exact, similar, is_id, is_banned)
     if description.strip().isdigit():
         uid = int(description.strip())
         m = guild.get_member(uid)
@@ -298,7 +297,7 @@ async def apply_spam_mute(message):
         data["total_warns"] += 1
         duration_txt = "20 minutes"
     else:
-        duration = None  # mute permanent
+        duration = None
         data["warns"] = min(data["warns"] + 1, 3)
         data["total_warns"] += 1
         duration_txt = "permanent"
@@ -328,7 +327,6 @@ async def apply_spam_mute(message):
     )
     embed.set_thumbnail(url=member.display_avatar.url)
 
-    # Si mute permanent → indiquer qu'il peut faire un ticket
     if duration is None:
         ticket_ch = get_channel_by_name(guild, "ticket")
         if ticket_ch:
@@ -350,7 +348,6 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
 
     action = action_data.get("action")
 
-    # show_profile ne doit jamais passer par execute_action comme sanction
     if action == "show_profile":
         await show_profile(mod_channel, member, guild)
         await log_action(guild, "show_profile", moderator, member)
@@ -373,7 +370,6 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
             data["mutes"] += 1
         elif action == "unmute":
             await member.timeout(None)
-            # reset warns si mute anti-spam (3 warns)
             if data.get("spam_mute_count", 0) >= 3 or data["warns"] >= 3:
                 data["warns"] = 1
                 data["spam_mute_count"] = 0
@@ -519,7 +515,6 @@ async def show_profile(channel, member, guild, show_mod_data=True):
     embed.add_field(name="🤖 Appréciation IA", value=data_msg["ai"], inline=False)
 
     if show_mod_data:
-        # Statut de sanction actuelle
         sanction_status = []
         if member.is_timed_out():
             until = member.timed_out_until
@@ -555,7 +550,6 @@ async def show_profile(channel, member, guild, show_mod_data=True):
     await msg.edit(embed=embed)
 
     if show_mod_data:
-        # Boutons pour ajouter/supprimer commentaire
         action_embed = discord.Embed(
             title="💬 Gestion des commentaires",
             description="➕ pour ajouter un commentaire\n➖ pour supprimer un commentaire",
@@ -652,7 +646,6 @@ async def handle_member_resolution(channel, action_data, author_id, exact, simil
         action_data["is_banned"] = is_banned
 
         if is_banned:
-            # Personne bannie : seul unban ou show_profile disponibles
             user = exact[0]
             embed = discord.Embed(
                 title=f"🔨 {user.display_name} est banni",
@@ -706,7 +699,6 @@ async def handle_member_resolution(channel, action_data, author_id, exact, simil
         bot_msg = await channel.send(embed=embed)
         await bot_msg.add_reaction("✅")
         await bot_msg.add_reaction("❌")
-        # On stocke dans waiting_for_member_choice avec candidate unique
         waiting_for_member_choice[bot_msg.id] = (action_data, author_id, [m])
         return
 
@@ -762,7 +754,7 @@ async def daily_report_loop():
 async def update_active_roles_loop():
     await client.wait_until_ready()
     while not client.is_closed():
-        await asyncio.sleep(3600)  # toutes les heures
+        await asyncio.sleep(3600)
         for guild in client.guilds:
             role_actif = discord.utils.get(guild.roles, name=ROLE_MEMBRE_ACTIF)
             role_membre = discord.utils.get(guild.roles, name=ROLE_MEMBRE)
@@ -773,13 +765,11 @@ async def update_active_roles_loop():
                 member = guild.get_member(int(mid))
                 if not member:
                     continue
-                # vérifie 2 jours consécutifs avec 10+ messages
                 active_streak = 0
                 for i in range(ACTIVE_DAYS_REQUIRED):
                     day = (today - timedelta(days=i)).isoformat()
                     if days_data.get(day, 0) >= ACTIVE_MESSAGES_PER_DAY:
                         active_streak += 1
-                # vérifie inactivité 2 jours
                 inactive_streak = 0
                 for i in range(INACTIVE_DAYS_REQUIRED):
                     day = (today - timedelta(days=i)).isoformat()
@@ -816,17 +806,25 @@ async def send_help(channel):
             "`!profil` — voir ton niveau, pièces, rôles équipés\n"
             "`!inventaire` — voir tous tes rôles achetés\n"
             "`!classement` — top des membres les plus actifs\n\n"
-            "**Boutique & Gacha**\n"
-            "`!boutique` — voir la boutique standard et rotative\n"
-            "`!acheter [nom]` — acheter un article\n"
-            "`!équiper [nom]` — équiper un rôle\n"
-            "`!spin` — tenter le gacha (50 pièces)\n\n"
             "**Social**\n"
             "`!parrainer @pseudo` — parrainer un ami\n"
             "`!abonner #salon` — s'abonner aux notifs d'un salon\n"
             "`!désabonner #salon` — se désabonner\n\n"
-            "💡 Pour ta récompense quotidienne, va dans 🎁・daily et tape `!daily`"
+            "💡 Boutique → 🛍️・boutique\n"
+            "🎁 Récompense quotidienne → 🎁・daily"
         )
+
+    elif "boutique" in channel_name:
+        embed.title = "📖 Commandes — 🛍️・boutique"
+        embed.description = (
+            "**Boutique & Gacha**\n"
+            "`!boutique` — voir la boutique standard et rotative\n"
+            "`!acheter [nom]` — acheter un article\n"
+            "`!équiper [nom]` — équiper un rôle cosmétique\n"
+            "`!spin` — tenter le gacha (50 pièces)\n\n"
+            "💡 La boutique rotative se renouvelle toutes les **3h**"
+        )
+
     elif "daily" in channel_name:
         embed.title = "📖 Commandes — 🎁・daily"
         embed.description = (
@@ -838,19 +836,21 @@ async def send_help(channel):
             "30 jours de suite → x3\n\n"
             "⚠️ Si tu rates un jour, ton streak repart à 0 !"
         )
+
     elif "modération" in channel_name or "moderation" in channel_name:
         embed.title = "📖 Commandes — Modération"
         embed.description = (
             "Tu peux écrire en **langage naturel** :\n\n"
             "• `mute @pseudo 30 minutes` — mute un membre\n"
-            "• `ban le dernier qui a spammé` — bannit un membre\n"
+            "• `ban @pseudo` — bannit un membre\n"
             "• `kick @pseudo` — kick un membre\n"
             "• `warn @pseudo` — avertit un membre\n"
             "• `unmute @pseudo` — démute un membre\n"
             "• `unban @pseudo` — débannit un membre\n"
-            "• `supprime 10 messages de @pseudo` — supprime ses messages\n\n"
-            "Tu peux aussi mentionner directement (`@pseudo`) ou donner l'ID complet avec la raison pour une confirmation directe."
+            "• `supprime 10 messages de @pseudo` — supprime ses messages\n"
+            "• `profil de @pseudo` — voir le profil complet d'un membre"
         )
+
     elif "log" in channel_name:
         embed.title = "📖 Lecture des logs"
         embed.description = (
@@ -859,14 +859,17 @@ async def send_help(channel):
             "🔊 Demutes • ✅ Débans • 📥 Arrivées • 📤 Départs\n"
             "💬 Commentaires modos • 🤖 Mutes anti-spam"
         )
+
     else:
         embed.title = "📖 Aide — Prowler Bot"
         embed.description = (
-            "**Salons où tu peux utiliser des commandes :**\n\n"
-            "🎮・jeux — profil, classement, boutique, inventaire, spin...\n"
-            "🎁・daily — récupère ta récompense quotidienne\n\n"
-            "Tape `?help` dans ces salons pour voir toutes les commandes disponibles."
+            "**Salons disponibles :**\n\n"
+            "🎮・jeux — profil, classement, social\n"
+            "🛍️・boutique — boutique, gacha, achats\n"
+            "🎁・daily — récompense quotidienne\n\n"
+            "Tape `?help` dans ces salons pour les commandes détaillées."
         )
+
     embed.set_footer(text="Prowler Bot")
     await channel.send(embed=embed)
 
@@ -883,7 +886,6 @@ async def on_ready():
 async def on_member_join(member):
     guild = member.guild
 
-    # Attribuer rôle Membre
     role = discord.utils.get(guild.roles, name=ROLE_MEMBRE)
     if role:
         try:
@@ -891,12 +893,10 @@ async def on_member_join(member):
         except:
             pass
 
-    # Bienvenue discret dans général
     general = get_channel_by_name(guild, "chat-général")
     if general:
         await general.send(f"👋 Bienvenue sur le serveur, {member.mention} !")
 
-    # Log
     await log_action(guild, "join", None, member)
 
 @client.event
@@ -909,7 +909,6 @@ async def on_reaction_add(reaction, user):
         return
     msg_id = reaction.message.id
 
-    # --- Gestion action (sanctionner / profil / commentaire) ---
     if msg_id in waiting_for_action_choice:
         choice_type, member, action_data, requester_id = waiting_for_action_choice[msg_id]
 
@@ -921,7 +920,6 @@ async def on_reaction_add(reaction, user):
                 action_data["action"] = "unban"
                 await send_confirmation(reaction.message.channel, action_data, requester_id)
             elif str(reaction.emoji) == "🔍":
-                # Profil limité pour un banni (pas de membre Discord)
                 db = load_db()
                 data = get_member_data(db, member.id)
                 embed = discord.Embed(title=f"👤 Profil (banni) — {member.display_name}", color=0xe74c3c)
@@ -993,14 +991,12 @@ async def on_reaction_add(reaction, user):
                 waiting_for_action_choice[cmsg.id] = ("comment_remove_pick", member, None, user.id)
         return
 
-    # --- Choix de membre ---
     if msg_id in waiting_for_member_choice:
         action_data, requester_id, candidates = waiting_for_member_choice[msg_id]
         if user.id != requester_id:
             return
         emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
 
-        # ✅ pour membre similaire unique (1 seul candidat)
         if str(reaction.emoji) == "✅" and len(candidates) == 1:
             waiting_for_member_choice.pop(msg_id)
             action_data["resolved_member"] = candidates[0]
@@ -1025,7 +1021,6 @@ async def on_reaction_add(reaction, user):
                     await ask_action_choice(reaction.message.channel, candidates[idx], action_data, requester_id)
         return
 
-    # --- Confirmation d'action ---
     if msg_id in pending_actions:
         action_data, requester_id = pending_actions[msg_id]
         if user.id != requester_id:
@@ -1052,12 +1047,12 @@ async def on_message(message):
         member_message_days[mid] = {}
     member_message_days[mid][today] = member_message_days[mid].get(today, 0) + 1
 
-    # --- Commande !help ---
+    # --- Commande !help / ?help ---
     if message.content.strip().lower() in ["!help", "?help"]:
         await send_help(message.channel)
         return
 
-    # --- Salon modération ---
+    # --- Salon modération uniquement pour les commandes de mod ---
     if "modération" not in channel_name and "moderation" not in channel_name:
         return
 

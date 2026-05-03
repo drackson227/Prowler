@@ -129,7 +129,7 @@ async def on_message(message):
     async with message.channel.typing():
         try:
             response = ai_client.chat.completions.create(
-                model="meta-llama/llama-3.1-8b-instruct:free",
+                model="mistralai/mistral-7b-instruct:free",
                 messages=[{"role": "user", "content": f"{SYSTEM_PROMPT}\n\nMessage du modérateur: {message.content}"}]
             )
             raw = response.choices[0].message.content.strip()

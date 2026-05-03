@@ -2,8 +2,9 @@ import discord
 import os
 import json
 import asyncio
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone
 from openai import OpenAI
+from collections import defaultdict
 
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
@@ -23,6 +24,7 @@ client = discord.Client(intents=intents)
 pending_actions = {}
 waiting_for_reason = {}
 waiting_for_member_choice = {}
+waiting_for_action_choice = {}
 
 SYSTEM_PROMPT = """Tu es un assistant de modération Discord. 
 À partir d'un message en langage naturel, tu dois extraire l'action de modération voulue et retourner un JSON.
@@ -106,14 +108,26 @@ def find_similar_members(guild, description):
     return exact, similar_members[:5]
 
 async def find_member(guild, description, channel):
+    # Détection par ID
+    if description.strip().isdigit():
+        member = guild.get_member(int(description.strip()))
+        if member:
+            return [member], [], True
+        return [], [], True
+
+    # Détection par mention
     if description.startswith("<@") and description.endswith(">"):
         uid = description.strip("<@!>")
         try:
-            return [guild.get_member(int(uid))], []
+            member = guild.get_member(int(uid))
+            if member:
+                return [member], [], True
         except:
-            return [], []
+            pass
+        return [], [], True
+
     exact, similar = find_similar_members(guild, description)
-    return exact, similar
+    return exact, similar, False
 
 async def reformulate_reason(raw_reason):
     try:
@@ -124,6 +138,121 @@ async def reformulate_reason(raw_reason):
         return response.choices[0].message.content.strip()
     except:
         return raw_reason
+
+async def analyze_member(guild, member):
+    messages = []
+    activity_days = defaultdict(int)
+
+    public_channels = [
+        ch for ch in guild.text_channels
+        if ch.permissions_for(guild.default_role).read_messages
+    ]
+
+    for channel in public_channels:
+        try:
+            async for msg in channel.history(limit=200):
+                if msg.author.id == member.id:
+                    messages.append(msg)
+                    day = msg.created_at.strftime("%Y-%m-%d")
+                    activity_days[day] += 1
+                if len(messages) >= 50:
+                    break
+        except:
+            continue
+        if len(messages) >= 50:
+            break
+
+    # Calcul activité
+    if activity_days:
+        avg_messages_per_day = sum(activity_days.values()) / len(activity_days)
+        last_active = max(activity_days.keys())
+        days_since = (datetime.now() - datetime.strptime(last_active, "%Y-%m-%d")).days
+        if days_since == 0:
+            activity_status = "🟢 Actif aujourd'hui"
+        elif days_since <= 3:
+            activity_status = f"🟡 Actif il y a {days_since} jours"
+        elif days_since <= 7:
+            activity_status = f"🟠 Peu actif ({days_since} jours)"
+        else:
+            activity_status = f"🔴 Inactif ({days_since} jours)"
+    else:
+        avg_messages_per_day = 0
+        activity_status = "⚫ Aucune activité détectée"
+
+    # Analyse IA
+    ai_analysis = "Aucun message à analyser."
+    if messages:
+        messages_text = "\n".join([f"- {m.content}" for m in messages[:50] if m.content])
+        try:
+            response = ai_client.chat.completions.create(
+                model="openrouter/free",
+                messages=[{
+                    "role": "user",
+                    "content": f"""Analyse le comportement de cet utilisateur Discord basé sur ses 50 derniers messages.
+Donne une appréciation courte (3-5 lignes max) en mentionnant :
+- Son ton général (poli, agressif, neutre...)
+- S'il insulte souvent ou non
+- Son niveau d'activité dans les discussions
+- Une appréciation globale
+
+Messages :
+{messages_text}
+
+Réponds en français, de façon concise et professionnelle."""
+                }]
+            )
+            ai_analysis = response.choices[0].message.content.strip()
+        except:
+            ai_analysis = "Impossible d'analyser les messages."
+
+    return {
+        "messages": messages,
+        "activity_status": activity_status,
+        "avg_per_day": round(avg_messages_per_day, 1),
+        "total_analyzed": len(messages),
+        "ai_analysis": ai_analysis
+    }
+
+async def show_profile(channel, member, guild):
+    loading_embed = discord.Embed(
+        title=f"🔍 Analyse de {member.display_name} en cours...",
+        description="Récupération des données, patiente quelques secondes...",
+        color=0x3498db
+    )
+    loading_msg = await channel.send(embed=loading_embed)
+
+    data = await analyze_member(guild, member)
+
+    roles = [r.mention for r in member.roles if r.name != "@everyone"]
+    roles_text = ", ".join(roles) if roles else "Aucun rôle"
+
+    joined_at = member.joined_at.strftime("%d/%m/%Y") if member.joined_at else "Inconnu"
+    created_at = member.created_at.strftime("%d/%m/%Y")
+
+    embed = discord.Embed(
+        title=f"👤 Profil — {member.display_name}",
+        color=0x3498db
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+
+    embed.add_field(name="🏷️ Pseudo", value=f"{member.name}", inline=True)
+    embed.add_field(name="🆔 ID", value=f"`{member.id}`", inline=True)
+    embed.add_field(name="📅 Compte créé", value=created_at, inline=True)
+    embed.add_field(name="📥 A rejoint le", value=joined_at, inline=True)
+    embed.add_field(name="🎭 Rôles", value=roles_text, inline=False)
+    embed.add_field(
+        name="📊 Activité",
+        value=f"{data['activity_status']}\n~{data['avg_per_day']} msgs/jour • {data['total_analyzed']} messages analysés",
+        inline=False
+    )
+    embed.add_field(
+        name="🤖 Appréciation IA",
+        value=data['ai_analysis'],
+        inline=False
+    )
+    embed.set_footer(text=f"Analyse basée sur les {data['total_analyzed']} derniers messages publics")
+
+    await loading_msg.edit(embed=embed)
 
 async def execute_action(guild, action_data, mod_channel):
     member = action_data.get("resolved_member")
@@ -217,6 +346,23 @@ async def send_confirmation(channel, action_data, author_id):
         )
         await channel.send(embed=expired_embed)
 
+async def ask_action_choice(channel, member, action_data, author_id):
+    embed = discord.Embed(
+        title=f"👤 {member.display_name} trouvé !",
+        description="Que veux-tu faire ?",
+        color=0x3498db
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="⚔️ Sanctionner", value="Applique une sanction à ce membre", inline=True)
+    embed.add_field(name="🔍 Voir le profil", value="Analyse complète + appréciation IA", inline=True)
+    embed.set_footer(text="Réagis ⚔️ pour sanctionner ou 🔍 pour voir le profil")
+
+    bot_msg = await channel.send(embed=embed)
+    await bot_msg.add_reaction("⚔️")
+    await bot_msg.add_reaction("🔍")
+    await bot_msg.add_reaction("❌")
+    waiting_for_action_choice[bot_msg.id] = (member, action_data, author_id)
+
 async def ask_member_choice(channel, action_data, author_id, candidates):
     embed = discord.Embed(
         title="🔍 Plusieurs membres trouvés",
@@ -237,7 +383,7 @@ async def ask_member_choice(channel, action_data, author_id, candidates):
     await bot_msg.add_reaction("❌")
     waiting_for_member_choice[bot_msg.id] = (action_data, author_id, candidates[:5])
 
-async def handle_member_resolution(channel, action_data, author_id, exact, similar):
+async def handle_member_resolution(channel, action_data, author_id, exact, similar, is_id=False):
     all_candidates = exact + similar
 
     if len(all_candidates) == 0:
@@ -249,20 +395,26 @@ async def handle_member_resolution(channel, action_data, author_id, exact, simil
         await channel.send(embed=embed)
         return
 
-    if len(exact) == 1 and len(similar) == 0:
+    # Si ID exact ou mention → confirmation directe si raison déjà là
+    if is_id and len(exact) == 1:
         action_data["resolved_member"] = exact[0]
-        if action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
-            embed = discord.Embed(
-                title="📝 Raison de la sanction",
-                description="Quelle est la raison de cette sanction ?",
-                color=0x3498db
-            )
+        if action_data.get("reason"):
+            await send_confirmation(channel, action_data, author_id)
+        elif action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
+            embed = discord.Embed(title="📝 Raison de la sanction", description="Quelle est la raison de cette sanction ?", color=0x3498db)
             await channel.send(embed=embed)
             waiting_for_reason[author_id] = action_data
         else:
             await send_confirmation(channel, action_data, author_id)
         return
 
+    # Un seul membre exact trouvé → choix sanctionner ou profil
+    if len(exact) == 1 and len(similar) == 0:
+        action_data["resolved_member"] = exact[0]
+        await ask_action_choice(channel, exact[0], action_data, author_id)
+        return
+
+    # Un seul membre similaire
     if len(all_candidates) == 1:
         action_data["resolved_member"] = all_candidates[0]
         member = all_candidates[0]
@@ -290,6 +442,27 @@ async def on_reaction_add(reaction, user):
     if user.bot:
         return
 
+    # Choix sanctionner ou profil
+    if reaction.message.id in waiting_for_action_choice:
+        member, action_data, requester_id = waiting_for_action_choice[reaction.message.id]
+        if user.id != requester_id:
+            return
+        waiting_for_action_choice.pop(reaction.message.id)
+
+        if str(reaction.emoji) == "⚔️":
+            if action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
+                embed = discord.Embed(title="📝 Raison de la sanction", description="Quelle est la raison de cette sanction ?", color=0x3498db)
+                await reaction.message.channel.send(embed=embed)
+                waiting_for_reason[requester_id] = action_data
+            else:
+                await send_confirmation(reaction.message.channel, action_data, requester_id)
+        elif str(reaction.emoji) == "🔍":
+            await show_profile(reaction.message.channel, member, reaction.message.guild)
+        elif str(reaction.emoji) == "❌":
+            await reaction.message.channel.send(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))
+        return
+
+    # Choix de membre
     if reaction.message.id in waiting_for_member_choice:
         action_data, requester_id, candidates = waiting_for_member_choice[reaction.message.id]
         if user.id != requester_id:
@@ -304,14 +477,10 @@ async def on_reaction_add(reaction, user):
             if idx < len(candidates):
                 waiting_for_member_choice.pop(reaction.message.id)
                 action_data["resolved_member"] = candidates[idx]
-                if action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
-                    embed = discord.Embed(title="📝 Raison de la sanction", description="Quelle est la raison de cette sanction ?", color=0x3498db)
-                    await reaction.message.channel.send(embed=embed)
-                    waiting_for_reason[requester_id] = action_data
-                else:
-                    await send_confirmation(reaction.message.channel, action_data, requester_id)
+                await ask_action_choice(reaction.message.channel, candidates[idx], action_data, requester_id)
         return
 
+    # Confirmation d'action
     if reaction.message.id in pending_actions:
         action_data, requester_id = pending_actions[reaction.message.id]
         if user.id != requester_id:
@@ -366,7 +535,7 @@ async def on_message(message):
         await message.channel.send(f"❓ {action_data.get('clarification_question')}")
         return
 
-    exact, similar = await find_member(message.guild, action_data.get("target", ""), message.channel)
-    await handle_member_resolution(message.channel, action_data, message.author.id, exact, similar)
+    exact, similar, is_id = await find_member(message.guild, action_data.get("target", ""), message.channel)
+    await handle_member_resolution(message.channel, action_data, message.author.id, exact, similar, is_id)
 
 client.run(DISCORD_TOKEN)

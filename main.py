@@ -1,26 +1,24 @@
 import discord
-from google import genai as google_genai
 import os
 import json
 import asyncio
 from datetime import timedelta
+from openai import OpenAI
 
-# ============================================================
-# CONFIG
-# ============================================================
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 ALLOWED_ROLES = ["Modérateur"]
-# ============================================================
 
-client_ai = google_genai.Client(api_key=GEMINI_API_KEY)
+ai_client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY
+)
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
 client = discord.Client(intents=intents)
-
 pending_actions = {}
 
 SYSTEM_PROMPT = """Tu es un assistant de modération Discord. 
@@ -56,50 +54,40 @@ async def find_member(guild, description, channel):
             return guild.get_member(int(uid))
         except:
             return None
-
     description_lower = description.lower()
     for member in guild.members:
         if description_lower in member.display_name.lower() or description_lower in member.name.lower():
             return member
-
     async for msg in channel.history(limit=50):
         if description_lower in msg.content.lower() and not msg.author.bot:
             return msg.author
-
     return None
 
 async def execute_action(guild, action_data, mod_channel):
     target_desc = action_data.get("target", "")
     member = await find_member(guild, target_desc, mod_channel)
-
     if not member:
         await mod_channel.send(f"❌ Impossible de trouver l'utilisateur : **{target_desc}**")
         return
-
     action = action_data.get("action")
     reason = action_data.get("reason", "Aucune raison spécifiée")
-
     try:
         if action == "ban":
             await member.ban(reason=reason)
             await mod_channel.send(f"✅ **{member.display_name}** a été banni. Raison : {reason}")
-
         elif action == "kick":
             await member.kick(reason=reason)
             await mod_channel.send(f"✅ **{member.display_name}** a été kické. Raison : {reason}")
-
         elif action == "mute":
             duration = action_data.get("duration_minutes") or 10
             await member.timeout(timedelta(minutes=duration), reason=reason)
             await mod_channel.send(f"✅ **{member.display_name}** a été mute pour {duration} minutes. Raison : {reason}")
-
         elif action == "warn":
             try:
                 await member.send(f"⚠️ Tu as reçu un avertissement sur **{guild.name}** : {reason}")
             except:
                 pass
             await mod_channel.send(f"✅ **{member.display_name}** a été averti. Raison : {reason}")
-
         elif action == "delete_messages":
             count = action_data.get("count") or 10
             deleted = 0
@@ -108,7 +96,6 @@ async def execute_action(guild, action_data, mod_channel):
                     await msg.delete()
                     deleted += 1
             await mod_channel.send(f"✅ {deleted} messages de **{member.display_name}** supprimés.")
-
     except discord.Forbidden:
         await mod_channel.send(f"❌ Je n'ai pas les permissions pour faire ça sur **{member.display_name}**.")
     except Exception as e:
@@ -122,21 +109,17 @@ async def on_ready():
 async def on_message(message):
     if message.author.bot:
         return
-
     channel_name = message.channel.name
     if "modération" not in channel_name and "moderation" not in channel_name:
         return
-
     if not has_permission(message.author):
         await message.channel.send("❌ Tu n'as pas la permission d'utiliser le bot de modération.")
         return
-
     if message.content.strip() in ["✅", "oui", "yes", "confirme", "ok"]:
         action_data = pending_actions.pop(message.author.id, None)
         if action_data:
             await execute_action(message.guild, action_data, message.channel)
         return
-
     if message.content.strip() in ["❌", "non", "no", "annule", "cancel"]:
         if message.author.id in pending_actions:
             pending_actions.pop(message.author.id)
@@ -145,27 +128,23 @@ async def on_message(message):
 
     async with message.channel.typing():
         try:
-            response = client_ai.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=f"{SYSTEM_PROMPT}\n\nMessage du modérateur: {message.content}"
+            response = ai_client.chat.completions.create(
+                model="meta-llama/llama-3.1-8b-instruct:free",
+                messages=[{"role": "user", "content": f"{SYSTEM_PROMPT}\n\nMessage du modérateur: {message.content}"}]
             )
-            raw = response.text.strip()
-
+            raw = response.choices[0].message.content.strip()
             if raw.startswith("```"):
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
                     raw = raw[4:]
             raw = raw.strip()
-
             action_data = json.loads(raw)
-
         except Exception as e:
             await message.channel.send(f"❌ Erreur lors de l'analyse : {e}")
             return
 
     if action_data.get("action") == "none":
         return
-
     if action_data.get("needs_clarification"):
         await message.channel.send(f"❓ {action_data.get('clarification_question')}")
         return

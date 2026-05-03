@@ -690,7 +690,7 @@ async def handle_member_resolution(channel, action_data, author_id, exact, simil
         m = all_candidates[0]
         embed = discord.Embed(
             title="🔍 Membre similaire trouvé",
-            description=f"Je n'ai pas trouvé **{action_data.get('target')}** exactement.\nVoulais-tu dire **{m.display_name}** ?",
+            description=f"Voulais-tu dire **{m.display_name}** ?",
             color=0xf39c12
         )
         embed.set_thumbnail(url=m.display_avatar.url)
@@ -698,7 +698,8 @@ async def handle_member_resolution(channel, action_data, author_id, exact, simil
         bot_msg = await channel.send(embed=embed)
         await bot_msg.add_reaction("✅")
         await bot_msg.add_reaction("❌")
-        pending_actions[bot_msg.id] = (action_data, author_id)
+        # On stocke dans waiting_for_member_choice avec candidate unique
+        waiting_for_member_choice[bot_msg.id] = (action_data, author_id, [m])
         return
 
     await ask_member_choice(channel, action_data, author_id, all_candidates)
@@ -963,6 +964,17 @@ async def on_reaction_add(reaction, user):
         if user.id != requester_id:
             return
         emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+
+        # ✅ pour membre similaire unique (1 seul candidat)
+        if str(reaction.emoji) == "✅" and len(candidates) == 1:
+            waiting_for_member_choice.pop(msg_id)
+            action_data["resolved_member"] = candidates[0]
+            if action_data.get("action") == "show_profile":
+                await show_profile(reaction.message.channel, candidates[0], reaction.message.guild)
+            else:
+                await ask_action_choice(reaction.message.channel, candidates[0], action_data, requester_id)
+            return
+
         if str(reaction.emoji) == "❌":
             waiting_for_member_choice.pop(msg_id)
             await reaction.message.channel.send(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))

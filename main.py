@@ -11,6 +11,8 @@ from collections import defaultdict
 # ============================================================
 # CONFIG
 # ============================================================
+from openai import OpenAI
+
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
@@ -34,12 +36,12 @@ SPAM_WINDOW = 30
 XP_PER_MESSAGE = 10
 COINS_PER_MESSAGE = 1
 COINS_BOOST = 2
-BOOST_INTERVAL = 300      # 1 message toutes les 5 min pendant le boost
-BOOST_DURATION = 1800     # 30 min
-BOOST_INACTIVE = 360      # perdu après 6 min d'inactivité
+BOOST_INTERVAL = 300
+BOOST_DURATION = 1800
+BOOST_INACTIVE = 360
 
 # Boutique rotative
-SHOP_ROTATE_INTERVAL = 10800  # 3h
+SHOP_ROTATE_INTERVAL = 10800
 
 # Gacha
 GACHA_COST = 50
@@ -51,7 +53,6 @@ DAILY_BASE_COINS = 50
 
 ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 
-# Modèles gratuits en ordre de priorité (fallback automatique si rate limit)
 FREE_MODELS = [
     "google/gemma-3-4b-it:free",
     "meta-llama/llama-3.2-3b-instruct:free",
@@ -60,7 +61,6 @@ FREE_MODELS = [
 ]
 
 def ai_complete(messages):
-    """Appel IA avec fallback automatique sur plusieurs modèles gratuits."""
     for model in FREE_MODELS:
         try:
             r = ai_client.chat.completions.create(
@@ -71,10 +71,10 @@ def ai_complete(messages):
             return r.choices[0].message.content.strip()
         except Exception as e:
             err = str(e)
-            if "429" in err or "rate limit" in err.lower() or "Rate limit" in err:
-                continue  # essaie le modèle suivant
-            raise  # autre erreur → on la remonte
-    return None  # tous les modèles épuisés
+            if "429" in err or "rate limit" in err.lower():
+                continue
+            raise
+    return None
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -1384,6 +1384,84 @@ async def send_help(channel):
     await channel.send(embed=embed)
 
 # ============================================================
+# DÉTECTION LOCALE DES COMMANDES (sans IA)
+# ============================================================
+def parse_mod_command(content_lower, content_raw, message):
+    """
+    Détecte les commandes de modération sans appel IA.
+    Retourne un dict action_data ou None si vraiment rien compris.
+    """
+    mentions = message.mentions
+    words = content_raw.strip().split()
+
+    # Extraction de la cible
+    target = None
+    if mentions:
+        target = f"<@{mentions[0].id}>"
+    else:
+        # Mots à ignorer pour isoler la cible
+        IGNORE = {
+            "ban", "kick", "mute", "warn", "unmute", "unban",
+            "supprime", "supprimer", "delete", "profil", "infos",
+            "montre", "voir", "le", "la", "de", "du", "un", "une",
+            "pour", "message", "messages", "minutes", "min", "heures",
+            "h", "jours", "j", "info", "qui", "est", "remontre", "son"
+        }
+        non_cmd = [w for w in words if w.lower() not in IGNORE and not w.isdigit()]
+        if non_cmd:
+            target = non_cmd[-1]
+
+    # Extraction durée
+    duration = None
+    dur_match = re.search(r'(\d+)\s*(min(?:utes?)?|h(?:eures?)?|j(?:ours?)?)?', content_lower)
+    if dur_match:
+        val = int(dur_match.group(1))
+        unit = (dur_match.group(2) or "min").lower()
+        if unit.startswith("h"):
+            duration = val * 60
+        elif unit.startswith("j"):
+            duration = val * 1440
+        else:
+            duration = val
+
+    # Détection de l'action par mots-clés
+    if any(x in content_lower for x in ["unban", "débannir", "debannir"]):
+        return {"action": "unban", "target": target, "reason": None}
+
+    if any(x in content_lower for x in ["unmute", "démute", "demute"]):
+        return {"action": "unmute", "target": target, "reason": None}
+
+    if "ban" in content_lower:
+        return {"action": "ban", "target": target, "reason": None}
+
+    if "kick" in content_lower:
+        return {"action": "kick", "target": target, "reason": None}
+
+    if "mute" in content_lower:
+        return {"action": "mute", "target": target, "duration_minutes": duration, "reason": None}
+
+    if "warn" in content_lower or "avertis" in content_lower:
+        return {"action": "warn", "target": target, "reason": None}
+
+    if any(x in content_lower for x in ["supprime", "supprimer", "delete"]):
+        count = None
+        num_match = re.search(r'(\d+)', content_lower)
+        if num_match:
+            count = int(num_match.group(1))
+        return {"action": "delete_messages", "target": target, "count": count or 10, "reason": None}
+
+    if any(x in content_lower for x in ["profil", "infos", "montre", "remontre", "voir", "qui est", "info"]):
+        return {"action": "show_profile", "target": target, "reason": None}
+
+    # Pas de mot-clé reconnu → si on a une cible, c'est forcément show_profile (pseudo seul)
+    if target:
+        return {"action": "show_profile", "target": target, "reason": None}
+
+    # Message totalement vide de sens → IA en dernier recours
+    return None
+
+
+# ============================================================
 # ÉVÉNEMENTS
 # ============================================================
 @client.event
@@ -1655,37 +1733,38 @@ async def on_message(message):
         if spammed:
             return
 
-    # --- Analyse IA de la commande ---
-    async with message.channel.typing():
-        try:
-            raw = ai_complete([{"role": "user", "content": f"{SYSTEM_PROMPT}\n\nMessage du modérateur: {message.content}"}])
-            if raw is None:
+    # --- Détection locale des commandes (sans IA) ---
+    action_data = parse_mod_command(content_lower, message.content, message)
+
+    # --- Si détecté localement → on exécute directement, pas d'IA ---
+    if action_data is not None:
+        pass  # on continue avec action_data
+
+    # --- Phrase complexe non reconnue → essaie l'IA ---
+    else:
+        async with message.channel.typing():
+            try:
+                raw = ai_complete([{"role": "user", "content": f"{SYSTEM_PROMPT}\n\nMessage du modérateur: {message.content}"}])
+                if raw is None:
+                    await message.channel.send(embed=discord.Embed(
+                        title="⚠️ Limite IA atteinte",
+                        description="La limite gratuite est atteinte pour aujourd'hui.\nUtilise des commandes directes : `ban pseudo`, `mute pseudo 30`, `kick pseudo`",
+                        color=0xf39c12
+                    ))
+                    return
+                if raw.startswith("```"):
+                    raw = raw.split("```")[1]
+                    if raw.startswith("json"):
+                        raw = raw[4:]
+                raw = raw.strip()
+                action_data = json.loads(raw)
+            except:
                 await message.channel.send(embed=discord.Embed(
-                    title="⚠️ Limite IA atteinte",
-                    description="Tous les modèles gratuits sont en limite quotidienne.\nRéessaie dans quelques heures ou utilise les commandes directes (`ban`, `mute`, etc.).",
-                    color=0xf39c12
+                    title="❌ Commande non reconnue",
+                    description="Je n'ai pas compris. Essaie : `ban pseudo`, `mute pseudo 30`, `kick pseudo`, `warn pseudo`",
+                    color=0xe74c3c
                 ))
                 return
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            raw = raw.strip()
-            action_data = json.loads(raw)
-        except json.JSONDecodeError:
-            await message.channel.send(embed=discord.Embed(
-                title="❌ Erreur d'analyse",
-                description="Je n'ai pas pu interpréter ta commande. Réessaie en étant plus précis.",
-                color=0xe74c3c
-            ))
-            return
-        except Exception as e:
-            await message.channel.send(embed=discord.Embed(
-                title="❌ Erreur",
-                description="Une erreur s'est produite lors de l'analyse. Réessaie dans un moment.",
-                color=0xe74c3c
-            ))
-            return
 
     if action_data.get("action") == "none":
         return

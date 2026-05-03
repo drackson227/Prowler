@@ -1034,7 +1034,6 @@ async def handle_member_resolution(channel, action_data, author_id, exact, simil
             await send_confirmation(channel, action_data, author_id)
         return
 
-    # Un seul membre exact trouvé → toujours proposer le choix ⚔️/🔍
     if len(exact) == 1 and not similar:
         action_data["resolved_member"] = exact[0]
         if action_data.get("action") == "show_profile":
@@ -1043,7 +1042,6 @@ async def handle_member_resolution(channel, action_data, author_id, exact, simil
         await ask_action_choice(channel, exact[0], action_data, author_id)
         return
 
-    # Un seul candidat similaire
     if len(all_candidates) == 1:
         action_data["resolved_member"] = all_candidates[0]
         m = all_candidates[0]
@@ -1181,7 +1179,8 @@ async def update_active_roles_loop():
 # HELP
 # ============================================================
 async def send_help(channel):
-    channel_name = channel.name.lower().replace("・", "")
+    import unicodedata
+    channel_name = unicodedata.normalize("NFD", channel.name.lower().replace("・", "")).encode("ascii", "ignore").decode("ascii")
     embed = discord.Embed(color=0x3498db, timestamp=datetime.now(timezone.utc))
 
     if "jeux" in channel_name:
@@ -1351,13 +1350,12 @@ async def on_reaction_add(reaction, user):
                 ))
                 waiting_for_comment[user.id] = (member.id, "add", None)
             elif str(reaction.emoji) == "➖":
-                # BUG FIX: vérifier d'abord si des commentaires existent avant d'enregistrer l'état
                 db = load_db()
                 data = get_member_data(db, member.id)
                 comments = data.get("comments", [])
                 if not comments:
                     await reaction.message.channel.send("Aucun commentaire à supprimer.")
-                    return  # ← IMPORTANT : ne pas enregistrer waiting_for_comment
+                    return
                 emojis_c = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
                 embed = discord.Embed(title="🗑️ Supprimer un commentaire", color=0xe74c3c)
                 for i, c in enumerate(comments[:5]):
@@ -1436,7 +1434,11 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    channel_name = message.channel.name.lower().replace("・", "")
+    import unicodedata
+    def normalize_name(s):
+        s = s.lower().replace("・", "")
+        return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("ascii")
+    channel_name = normalize_name(message.channel.name)
     content = message.content.strip()
     content_lower = content.lower()
 
@@ -1503,7 +1505,7 @@ async def on_message(message):
         return
 
     # --- Salon modération uniquement pour les commandes de mod ---
-    if "modération" not in channel_name and "moderation" not in channel_name:
+    if "moderation" not in channel_name:
         return
 
     if not has_permission(message.author):
@@ -1547,10 +1549,11 @@ async def on_message(message):
             return
 
     # --- Analyse IA de la commande ---
-    async with message.channel.typing():
-        try:
+    action_data = None
+    try:
+        async with message.channel.typing():
             r = ai_client.chat.completions.create(
-                model="openrouter/free",
+                model="openrouter/auto",
                 messages=[{"role": "user", "content": f"{SYSTEM_PROMPT}\n\nMessage du modérateur: {message.content}"}]
             )
             raw = r.choices[0].message.content.strip()
@@ -1560,20 +1563,30 @@ async def on_message(message):
                     raw = raw[4:]
             raw = raw.strip()
             action_data = json.loads(raw)
-        except Exception as e:
-            await message.channel.send(f"❌ Erreur lors de l'analyse : {e}")
-            return
+    except json.JSONDecodeError:
+        # Réponse IA mal formée → traiter le message brut comme un pseudo
+        action_data = {"action": "none", "target": message.content.strip(), "needs_clarification": False}
+    except Exception as e:
+        await message.channel.send(embed=discord.Embed(
+            title="❌ Erreur IA",
+            description=f"```{e}```",
+            color=0xe74c3c
+        ))
+        return
 
     if action_data.get("action") == "none":
-        # Même si "none", vérifier si c'est un pseudo tapé seul
-        target = action_data.get("target", "")
+        # Essayer le target extrait par l'IA, sinon utiliser le message brut comme fallback
+        target = action_data.get("target", "").strip() or message.content.strip()
         if target:
             exact, similar, is_id, is_banned = await find_member(message.guild, target, message.channel)
             all_candidates = exact + similar
             if all_candidates:
                 action_data["action"] = "show_profile"
+                action_data["target"] = target
                 action_data["resolved_member"] = all_candidates[0]
                 await ask_action_choice(message.channel, all_candidates[0], action_data, message.author.id)
+                return
+        # Aucun membre trouvé → ignorer silencieusement (pas de message d'erreur parasite)
         return
 
     if action_data.get("action") == "show_profile" and not action_data.get("target"):

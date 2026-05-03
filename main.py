@@ -22,6 +22,7 @@ intents.reactions = True
 client = discord.Client(intents=intents)
 pending_actions = {}
 waiting_for_reason = {}
+waiting_for_member_choice = {}
 
 SYSTEM_PROMPT = """Tu es un assistant de modération Discord. 
 À partir d'un message en langage naturel, tu dois extraire l'action de modération voulue et retourner un JSON.
@@ -69,32 +70,49 @@ def has_permission(member):
         return True
     return any(role.name in ALLOWED_ROLES for role in member.roles)
 
+def similarity(a, b):
+    a, b = a.lower(), b.lower()
+    if a in b or b in a:
+        return 1.0
+    matches = sum(c in b for c in a)
+    return matches / max(len(a), len(b))
+
+def find_similar_members(guild, description):
+    description_lower = description.lower().strip()
+    exact = []
+    similar = []
+
+    for member in guild.members:
+        name_lower = member.display_name.lower()
+        username_lower = member.name.lower()
+        score = max(similarity(description_lower, name_lower), similarity(description_lower, username_lower))
+        if score == 1.0 and (description_lower == name_lower or description_lower == username_lower):
+            exact.append(member)
+        elif score >= 0.5:
+            similar.append((score, member))
+
+    similar.sort(key=lambda x: x[0], reverse=True)
+    similar_members = [m for _, m in similar if m not in exact]
+
+    return exact, similar_members[:5]
+
 async def find_member(guild, description, channel):
     if description.startswith("<@") and description.endswith(">"):
         uid = description.strip("<@!>")
         try:
-            return guild.get_member(int(uid))
+            return [guild.get_member(int(uid))], []
         except:
-            return None
-    description_lower = description.lower()
-    for member in guild.members:
-        if description_lower in member.display_name.lower() or description_lower in member.name.lower():
-            return member
-    async for msg in channel.history(limit=50):
-        if description_lower in msg.content.lower() and not msg.author.bot:
-            return msg.author
-    return None
+            return [], []
+
+    exact, similar = find_similar_members(guild, description)
+    return exact, similar
 
 async def execute_action(guild, action_data, mod_channel):
     target_desc = action_data.get("target", "")
-    member = await find_member(guild, target_desc, mod_channel)
+    member = action_data.get("resolved_member")
+
     if not member:
-        embed = discord.Embed(
-            title="❌ Utilisateur introuvable",
-            description=f"Impossible de trouver : **{target_desc}**",
-            color=0xe74c3c
-        )
-        await mod_channel.send(embed=embed)
+        await mod_channel.send("❌ Aucun membre résolu pour cette action.")
         return
 
     action = action_data.get("action")
@@ -125,7 +143,7 @@ async def execute_action(guild, action_data, mod_channel):
                     await msg.delete()
                     deleted += 1
 
-        color = 0x2ecc71 if action in ["unmute", "unban"] else ACTION_COLORS.get(action, 0x2ecc71)
+        color = ACTION_COLORS.get(action, 0x2ecc71)
         label = ACTION_LABELS.get(action, action)
         duration = action_data.get("duration_minutes")
 
@@ -149,30 +167,23 @@ async def execute_action(guild, action_data, mod_channel):
     except Exception as e:
         await mod_channel.send(f"❌ Erreur : {e}")
 
-async def send_confirmation(channel, action_data, author_id, member=None):
+async def send_confirmation(channel, action_data, author_id):
     action = action_data.get("action")
-    target = action_data.get("target", "?")
     duration = action_data.get("duration_minutes")
     reason = action_data.get("reason")
+    member = action_data.get("resolved_member")
 
     label = ACTION_LABELS.get(action, action)
     color = ACTION_COLORS.get(action, 0xf39c12)
 
-    embed = discord.Embed(
-        title=f"⚠️ Confirmation requise — {label}",
-        color=color
-    )
+    embed = discord.Embed(title=f"⚠️ Confirmation requise — {label}", color=color)
     if member:
         embed.set_thumbnail(url=member.display_avatar.url)
         embed.add_field(name="Utilisateur", value=f"{member.mention}", inline=True)
-    else:
-        embed.add_field(name="Cible", value=f"**{target}**", inline=True)
-
     if duration:
         embed.add_field(name="Durée", value=f"{duration} minutes", inline=True)
     if reason:
         embed.add_field(name="Raison", value=reason, inline=False)
-
     embed.set_footer(text="Réagis ✅ pour confirmer ou ❌ pour annuler • Expire dans 30s")
 
     bot_msg = await channel.send(embed=embed)
@@ -190,6 +201,72 @@ async def send_confirmation(channel, action_data, author_id, member=None):
         )
         await channel.send(embed=expired_embed)
 
+async def ask_member_choice(channel, action_data, author_id, candidates):
+    embed = discord.Embed(
+        title="🔍 Plusieurs membres trouvés",
+        description="Réagis avec le numéro correspondant au bon membre :",
+        color=0x3498db
+    )
+    emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+    for i, member in enumerate(candidates[:5]):
+        embed.add_field(
+            name=f"{emojis[i]} {member.display_name}",
+            value=f"`{member.name}` • ID: {member.id}",
+            inline=False
+        )
+    embed.set_footer(text="Réagis ❌ pour annuler")
+
+    bot_msg = await channel.send(embed=embed)
+    for i in range(len(candidates[:5])):
+        await bot_msg.add_reaction(emojis[i])
+    await bot_msg.add_reaction("❌")
+
+    waiting_for_member_choice[bot_msg.id] = (action_data, author_id, candidates[:5])
+
+async def handle_member_resolution(channel, action_data, author_id, exact, similar):
+    all_candidates = exact + similar
+
+    if len(all_candidates) == 0:
+        embed = discord.Embed(
+            title="❌ Membre introuvable",
+            description=f"Aucun membre trouvé pour **{action_data.get('target')}**.",
+            color=0xe74c3c
+        )
+        await channel.send(embed=embed)
+        return
+
+    if len(exact) == 1 and len(similar) == 0:
+        action_data["resolved_member"] = exact[0]
+        if action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
+            embed = discord.Embed(
+                title="📝 Raison de la sanction",
+                description="Quelle est la raison de cette sanction ?",
+                color=0x3498db
+            )
+            await channel.send(embed=embed)
+            waiting_for_reason[author_id] = action_data
+        else:
+            await send_confirmation(channel, action_data, author_id)
+        return
+
+    if len(all_candidates) == 1:
+        action_data["resolved_member"] = all_candidates[0]
+        member = all_candidates[0]
+        embed = discord.Embed(
+            title="🔍 Membre similaire trouvé",
+            description=f"Je n'ai pas trouvé **{action_data.get('target')}** exactement.\nVoulais-tu dire **{member.display_name}** ?",
+            color=0xf39c12
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text="Réagis ✅ pour confirmer ou ❌ pour annuler")
+        bot_msg = await channel.send(embed=embed)
+        await bot_msg.add_reaction("✅")
+        await bot_msg.add_reaction("❌")
+        pending_actions[bot_msg.id] = (action_data, author_id)
+        return
+
+    await ask_member_choice(channel, action_data, author_id, all_candidates)
+
 @client.event
 async def on_ready():
     print(f"✅ Bot connecté en tant que {client.user}")
@@ -198,21 +275,41 @@ async def on_ready():
 async def on_reaction_add(reaction, user):
     if user.bot:
         return
-    if reaction.message.id not in pending_actions:
+
+    # Choix de membre
+    if reaction.message.id in waiting_for_member_choice:
+        action_data, requester_id, candidates = waiting_for_member_choice[reaction.message.id]
+        if user.id != requester_id:
+            return
+        emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+        if str(reaction.emoji) == "❌":
+            waiting_for_member_choice.pop(reaction.message.id)
+            await reaction.message.channel.send(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))
+            return
+        if str(reaction.emoji) in emojis:
+            idx = emojis.index(str(reaction.emoji))
+            if idx < len(candidates):
+                waiting_for_member_choice.pop(reaction.message.id)
+                action_data["resolved_member"] = candidates[idx]
+                if action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
+                    embed = discord.Embed(title="📝 Raison de la sanction", description="Quelle est la raison de cette sanction ?", color=0x3498db)
+                    await reaction.message.channel.send(embed=embed)
+                    waiting_for_reason[requester_id] = action_data
+                else:
+                    await send_confirmation(reaction.message.channel, action_data, requester_id)
         return
-    action_data, requester_id = pending_actions[reaction.message.id]
-    if user.id != requester_id:
-        return
-    if str(reaction.emoji) == "✅":
-        pending_actions.pop(reaction.message.id)
-        await execute_action(reaction.message.guild, action_data, reaction.message.channel)
-    elif str(reaction.emoji) == "❌":
-        pending_actions.pop(reaction.message.id)
-        cancelled_embed = discord.Embed(
-            title="❌ Action annulée",
-            color=0x95a5a6
-        )
-        await reaction.message.channel.send(embed=cancelled_embed)
+
+    # Confirmation d'action
+    if reaction.message.id in pending_actions:
+        action_data, requester_id = pending_actions[reaction.message.id]
+        if user.id != requester_id:
+            return
+        if str(reaction.emoji) == "✅":
+            pending_actions.pop(reaction.message.id)
+            await execute_action(reaction.message.guild, action_data, reaction.message.channel)
+        elif str(reaction.emoji) == "❌":
+            pending_actions.pop(reaction.message.id)
+            await reaction.message.channel.send(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))
 
 @client.event
 async def on_message(message):
@@ -222,19 +319,14 @@ async def on_message(message):
     if "modération" not in channel_name and "moderation" not in channel_name:
         return
     if not has_permission(message.author):
-        embed = discord.Embed(
-            title="❌ Permission refusée",
-            description="Tu n'as pas la permission d'utiliser le bot de modération.",
-            color=0xe74c3c
-        )
+        embed = discord.Embed(title="❌ Permission refusée", description="Tu n'as pas la permission d'utiliser le bot de modération.", color=0xe74c3c)
         await message.channel.send(embed=embed)
         return
 
     if message.author.id in waiting_for_reason:
         action_data = waiting_for_reason.pop(message.author.id)
         action_data["reason"] = message.content
-        member = await find_member(message.guild, action_data.get("target", ""), message.channel)
-        await send_confirmation(message.channel, action_data, message.author.id, member=member)
+        await send_confirmation(message.channel, action_data, message.author.id)
         return
 
     async with message.channel.typing():
@@ -260,16 +352,7 @@ async def on_message(message):
         await message.channel.send(f"❓ {action_data.get('clarification_question')}")
         return
 
-    if action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
-        embed = discord.Embed(
-            title="📝 Raison de la sanction",
-            description="Quelle est la raison de cette sanction ?",
-            color=0x3498db
-        )
-        await message.channel.send(embed=embed)
-        waiting_for_reason[message.author.id] = action_data
-    else:
-        member = await find_member(message.guild, action_data.get("target", ""), message.channel)
-        await send_confirmation(message.channel, action_data, message.author.id, member=member)
+    exact, similar = await find_member(message.guild, action_data.get("target", ""), message.channel)
+    await handle_member_resolution(message.channel, action_data, message.author.id, exact, similar)
 
 client.run(DISCORD_TOKEN)

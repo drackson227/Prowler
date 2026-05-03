@@ -196,8 +196,11 @@ async def on_message(message):
         await message.channel.send(f"❓ {action_data.get('clarification_question')}")
         return
 
-    # Demander la raison
-    await message.channel.send("📝 **Quelle est la raison de cette sanction ?**")
-    waiting_for_reason[message.author.id] = action_data
+    # Demander la raison seulement pour les sanctions
+    if action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
+        await message.channel.send("📝 **Quelle est la raison de cette sanction ?**")
+        waiting_for_reason[message.author.id] = action_data
+    else:
+        await send_confirmation(message.channel, action_data, message.author.id)
 
 client.run(DISCORD_TOKEN)

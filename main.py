@@ -2,18 +2,35 @@ import discord
 import os
 import json
 import asyncio
+import re
 from datetime import timedelta, datetime, timezone
 from openai import OpenAI
 from collections import defaultdict
 
+# ============================================================
+# CONFIG
+# ============================================================
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-ALLOWED_ROLES = ["Modérateur"]
 
-ai_client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY
-)
+ALLOWED_ROLES = ["Modérateur"]
+MOD_CHANNEL = "modération"
+LOG_CHANNEL = "📋・logs"
+GENERAL_CHANNEL = "💬・chat-général"
+REPORT_CHANNEL = "📝・rapport-prowler"
+REPORT_HOUR = 22  # heure du rapport quotidien (UTC+0, ajuste si besoin)
+
+ROLE_MEMBRE = "Membre"
+ROLE_MEMBRE_ACTIF = "Membre Actif"
+ACTIVE_MESSAGES_PER_DAY = 10       # messages/jour minimum pour être actif
+ACTIVE_DAYS_REQUIRED = 2           # jours consécutifs
+INACTIVE_DAYS_REQUIRED = 2         # jours sans messages pour perdre le rôle
+
+SPAM_THRESHOLD = 10                # nb de messages identiques
+SPAM_WINDOW = 30                   # secondes
+# ============================================================
+
+ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -21,15 +38,51 @@ intents.members = True
 intents.reactions = True
 
 client = discord.Client(intents=intents)
-pending_actions = {}
-waiting_for_reason = {}
-waiting_for_member_choice = {}
-waiting_for_action_choice = {}
 
-SYSTEM_PROMPT = """Tu es un assistant de modération Discord. 
+# ---------- états en mémoire ----------
+pending_actions = {}          # msg_id → (action_data, author_id)
+waiting_for_reason = {}       # author_id → action_data
+waiting_for_member_choice = {}# msg_id → (action_data, author_id, candidates)
+waiting_for_action_choice = {}# msg_id → (member, action_data, author_id)
+waiting_for_comment = {}      # author_id → (member_id, "add"|"remove", comment_idx)
+spam_tracker = {}             # member_id → {content: str, times: [timestamps]}
+member_message_days = {}      # member_id → {date_str: count}
+
+# ---------- DB JSON simple ----------
+DB_FILE = "db.json"
+
+def load_db():
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_db(db):
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(db, f, ensure_ascii=False, indent=2)
+
+def get_member_data(db, member_id):
+    mid = str(member_id)
+    if mid not in db:
+        db[mid] = {
+            "warns": 0,
+            "total_warns": 0,
+            "mutes": 0,
+            "kicks": 0,
+            "bans": 0,
+            "spam_mute_count": 0,
+            "comments": [],
+            "sanctions": []
+        }
+    return db[mid]
+
+# ============================================================
+# PROMPTS IA
+# ============================================================
+SYSTEM_PROMPT = """Tu es un assistant de modération Discord.
 À partir d'un message en langage naturel, tu dois extraire l'action de modération voulue et retourner un JSON.
 
-Actions possibles: ban, kick, mute, warn, delete_messages, unmute, unban
+Actions possibles: ban, kick, mute, warn, delete_messages, unmute, unban, none
 
 Format de réponse JSON uniquement (pas de texte autour) :
 {
@@ -38,16 +91,15 @@ Format de réponse JSON uniquement (pas de texte autour) :
   "duration_minutes": null ou nombre (pour mute),
   "count": null ou nombre (pour delete_messages),
   "reason": null,
-  "confirmation_message": "Message lisible expliquant ce que tu vas faire",
   "needs_clarification": false,
   "clarification_question": null
 }
 
-Si la cible n'est pas claire, mets needs_clarification à true et pose une question.
+Si la cible n'est pas claire, mets needs_clarification à true.
 Si aucune action de modération n'est détectée, mets action à "none".
 """
 
-REASON_PROMPT = """Tu es un assistant de modération Discord. 
+REASON_PROMPT = """Tu es un assistant de modération Discord.
 Reformule la raison donnée par un modérateur en une raison officielle, courte et professionnelle.
 Réponds UNIQUEMENT avec la raison reformulée, rien d'autre, pas de guillemets.
 
@@ -55,30 +107,35 @@ Exemples :
 - "il est raciste" → "Comportement raciste"
 - "spam" → "Spam répété"
 - "il insulte tout le monde" → "Insultes envers les membres"
-- "il a envoyé des images inappropriées" → "Envoi de contenu inapproprié"
 - "trop chiant" → "Comportement perturbateur"
 """
 
+ANALYSIS_PROMPT = """Analyse le comportement de cet utilisateur Discord basé sur ses derniers messages.
+Donne une appréciation courte (3-5 lignes max) mentionnant :
+- Son ton général (poli, agressif, neutre...)
+- S'il insulte souvent ou non
+- Son niveau d'activité dans les discussions
+- Une appréciation globale
+
+Réponds en français, de façon concise et professionnelle."""
+
+# ============================================================
+# COULEURS & LABELS
+# ============================================================
 ACTION_COLORS = {
-    "ban": 0xe74c3c,
-    "kick": 0xe67e22,
-    "mute": 0xf39c12,
-    "unmute": 0x2ecc71,
-    "unban": 0x2ecc71,
-    "warn": 0xf1c40f,
+    "ban": 0xe74c3c, "kick": 0xe67e22, "mute": 0xf39c12,
+    "unmute": 0x2ecc71, "unban": 0x2ecc71, "warn": 0xf1c40f,
     "delete_messages": 0x9b59b6,
 }
-
 ACTION_LABELS = {
-    "ban": "🔨 Bannissement",
-    "kick": "👢 Kick",
-    "mute": "🔇 Mute",
-    "unmute": "🔊 Demute",
-    "unban": "✅ Déban",
-    "warn": "⚠️ Avertissement",
+    "ban": "🔨 Bannissement", "kick": "👢 Kick", "mute": "🔇 Mute",
+    "unmute": "🔊 Demute", "unban": "✅ Déban", "warn": "⚠️ Avertissement",
     "delete_messages": "🗑️ Suppression de messages",
 }
 
+# ============================================================
+# UTILITAIRES
+# ============================================================
 def has_permission(member):
     if member.guild.owner_id == member.id:
         return True
@@ -93,189 +150,214 @@ def similarity(a, b):
 
 def find_similar_members(guild, description):
     description_lower = description.lower().strip()
-    exact = []
-    similar = []
+    exact, similar = [], []
     for member in guild.members:
         name_lower = member.display_name.lower()
         username_lower = member.name.lower()
         score = max(similarity(description_lower, name_lower), similarity(description_lower, username_lower))
-        if score == 1.0 and (description_lower == name_lower or description_lower == username_lower):
+        if score == 1.0 and (description_lower in [name_lower, username_lower]):
             exact.append(member)
         elif score >= 0.5:
             similar.append((score, member))
     similar.sort(key=lambda x: x[0], reverse=True)
-    similar_members = [m for _, m in similar if m not in exact]
-    return exact, similar_members[:5]
+    return exact, [m for _, m in similar if m not in exact][:5]
 
 async def find_member(guild, description, channel):
-    # Détection par ID
     if description.strip().isdigit():
-        member = guild.get_member(int(description.strip()))
-        if member:
-            return [member], [], True
-        return [], [], True
-
-    # Détection par mention
+        m = guild.get_member(int(description.strip()))
+        return ([m], [], True) if m else ([], [], True)
     if description.startswith("<@") and description.endswith(">"):
         uid = description.strip("<@!>")
         try:
-            member = guild.get_member(int(uid))
-            if member:
-                return [member], [], True
+            m = guild.get_member(int(uid))
+            return ([m], [], True) if m else ([], [], True)
         except:
-            pass
-        return [], [], True
-
+            return [], [], True
     exact, similar = find_similar_members(guild, description)
     return exact, similar, False
 
 async def reformulate_reason(raw_reason):
     try:
-        response = ai_client.chat.completions.create(
+        r = ai_client.chat.completions.create(
             model="openrouter/free",
             messages=[{"role": "user", "content": f"{REASON_PROMPT}\n\nRaison brute : {raw_reason}"}]
         )
-        return response.choices[0].message.content.strip()
+        return r.choices[0].message.content.strip()
     except:
         return raw_reason
 
-async def analyze_member(guild, member):
-    messages = []
-    activity_days = defaultdict(int)
+def get_log_channel(guild):
+    for ch in guild.text_channels:
+        if LOG_CHANNEL in ch.name or "logs" in ch.name.lower():
+            return ch
+    return None
 
-    public_channels = [
-        ch for ch in guild.text_channels
-        if ch.permissions_for(guild.default_role).read_messages
-    ]
+def get_channel_by_name(guild, name):
+    for ch in guild.text_channels:
+        if name.lower().replace("・", "") in ch.name.lower().replace("・", ""):
+            return ch
+    return None
 
-    for channel in public_channels:
-        try:
-            async for msg in channel.history(limit=200):
-                if msg.author.id == member.id:
-                    messages.append(msg)
-                    day = msg.created_at.strftime("%Y-%m-%d")
-                    activity_days[day] += 1
-                if len(messages) >= 50:
-                    break
-        except:
-            continue
-        if len(messages) >= 50:
-            break
-
-    # Calcul activité
-    if activity_days:
-        avg_messages_per_day = sum(activity_days.values()) / len(activity_days)
-        last_active = max(activity_days.keys())
-        days_since = (datetime.now() - datetime.strptime(last_active, "%Y-%m-%d")).days
-        if days_since == 0:
-            activity_status = "🟢 Actif aujourd'hui"
-        elif days_since <= 3:
-            activity_status = f"🟡 Actif il y a {days_since} jours"
-        elif days_since <= 7:
-            activity_status = f"🟠 Peu actif ({days_since} jours)"
-        else:
-            activity_status = f"🔴 Inactif ({days_since} jours)"
-    else:
-        avg_messages_per_day = 0
-        activity_status = "⚫ Aucune activité détectée"
-
-    # Analyse IA
-    ai_analysis = "Aucun message à analyser."
-    if messages:
-        messages_text = "\n".join([f"- {m.content}" for m in messages[:50] if m.content])
-        try:
-            response = ai_client.chat.completions.create(
-                model="openrouter/free",
-                messages=[{
-                    "role": "user",
-                    "content": f"""Analyse le comportement de cet utilisateur Discord basé sur ses 50 derniers messages.
-Donne une appréciation courte (3-5 lignes max) en mentionnant :
-- Son ton général (poli, agressif, neutre...)
-- S'il insulte souvent ou non
-- Son niveau d'activité dans les discussions
-- Une appréciation globale
-
-Messages :
-{messages_text}
-
-Réponds en français, de façon concise et professionnelle."""
-                }]
-            )
-            ai_analysis = response.choices[0].message.content.strip()
-        except:
-            ai_analysis = "Impossible d'analyser les messages."
-
-    return {
-        "messages": messages,
-        "activity_status": activity_status,
-        "avg_per_day": round(avg_messages_per_day, 1),
-        "total_analyzed": len(messages),
-        "ai_analysis": ai_analysis
+# ============================================================
+# LOGS
+# ============================================================
+async def log_action(guild, action, moderator, target, reason=None, extra=None):
+    log_ch = get_log_channel(guild)
+    if not log_ch:
+        return
+    colors = {
+        "ban": 0xe74c3c, "kick": 0xe67e22, "mute": 0xf39c12,
+        "unmute": 0x2ecc71, "unban": 0x2ecc71, "warn": 0xf1c40f,
+        "spam_mute": 0xff6b35, "join": 0x2ecc71, "leave": 0x95a5a6,
+        "comment_add": 0x3498db, "comment_remove": 0xe74c3c,
+        "delete_messages": 0x9b59b6,
     }
-
-async def show_profile(channel, member, guild):
-    loading_embed = discord.Embed(
-        title=f"🔍 Analyse de {member.display_name} en cours...",
-        description="Récupération des données, patiente quelques secondes...",
-        color=0x3498db
-    )
-    loading_msg = await channel.send(embed=loading_embed)
-
-    data = await analyze_member(guild, member)
-
-    roles = [r.mention for r in member.roles if r.name != "@everyone"]
-    roles_text = ", ".join(roles) if roles else "Aucun rôle"
-
-    joined_at = member.joined_at.strftime("%d/%m/%Y") if member.joined_at else "Inconnu"
-    created_at = member.created_at.strftime("%d/%m/%Y")
-
+    labels = {
+        "ban": "🔨 Bannissement", "kick": "👢 Kick", "mute": "🔇 Mute",
+        "unmute": "🔊 Demute", "unban": "✅ Déban", "warn": "⚠️ Avertissement",
+        "spam_mute": "🤖 Mute anti-spam", "join": "📥 Arrivée", "leave": "📤 Départ",
+        "comment_add": "💬 Commentaire ajouté", "comment_remove": "🗑️ Commentaire supprimé",
+        "delete_messages": "🗑️ Messages supprimés",
+    }
     embed = discord.Embed(
-        title=f"👤 Profil — {member.display_name}",
-        color=0x3498db
+        title=labels.get(action, action),
+        color=colors.get(action, 0x95a5a6),
+        timestamp=datetime.now(timezone.utc)
+    )
+    if target:
+        embed.set_thumbnail(url=target.display_avatar.url)
+        embed.add_field(name="Utilisateur", value=f"{target.mention} (`{target.id}`)", inline=True)
+    if moderator:
+        embed.add_field(name="Modérateur", value=f"{moderator.mention}", inline=True)
+    if reason:
+        embed.add_field(name="Raison", value=reason, inline=False)
+    if extra:
+        for k, v in extra.items():
+            embed.add_field(name=k, value=str(v), inline=True)
+    await log_ch.send(embed=embed)
+
+# ============================================================
+# ANTI-SPAM
+# ============================================================
+async def check_spam(message):
+    mid = message.author.id
+    content = message.content.strip().lower()
+    now = datetime.now(timezone.utc).timestamp()
+
+    if mid not in spam_tracker:
+        spam_tracker[mid] = {"content": content, "times": []}
+
+    tracker = spam_tracker[mid]
+    if tracker["content"] != content:
+        spam_tracker[mid] = {"content": content, "times": [now]}
+        return False
+
+    tracker["times"] = [t for t in tracker["times"] if now - t < SPAM_WINDOW]
+    tracker["times"].append(now)
+
+    if len(tracker["times"]) >= SPAM_THRESHOLD:
+        spam_tracker[mid] = {"content": "", "times": []}
+        await apply_spam_mute(message)
+        return True
+    return False
+
+async def apply_spam_mute(message):
+    member = message.author
+    guild = message.guild
+    db = load_db()
+    data = get_member_data(db, member.id)
+
+    count = data.get("spam_mute_count", 0)
+    data["spam_mute_count"] = count + 1
+
+    if count == 0:
+        duration = timedelta(minutes=15)
+        data["warns"] = min(data["warns"] + 1, 3)
+        data["total_warns"] += 1
+        duration_txt = "15 minutes"
+    elif count == 1:
+        duration = timedelta(minutes=20)
+        data["warns"] = min(data["warns"] + 1, 3)
+        data["total_warns"] += 1
+        duration_txt = "20 minutes"
+    else:
+        duration = None  # mute permanent
+        data["warns"] = min(data["warns"] + 1, 3)
+        data["total_warns"] += 1
+        duration_txt = "permanent"
+
+    data["mutes"] += 1
+    data["sanctions"].append({
+        "type": "spam_mute",
+        "reason": "Spam répété (anti-spam automatique)",
+        "date": datetime.now(timezone.utc).isoformat(),
+        "duration": duration_txt
+    })
+    save_db(db)
+
+    try:
+        if duration:
+            await member.timeout(duration, reason="Spam répété (anti-spam automatique)")
+        else:
+            await member.timeout(timedelta(days=28), reason="Spam répété — mute permanent (anti-spam)")
+    except discord.Forbidden:
+        pass
+
+    ch = message.channel
+    embed = discord.Embed(
+        title="🤖 Anti-spam déclenché",
+        description=f"{member.mention} a été mute **{duration_txt}** pour spam répété.\nAvertissements actuels : **{data['warns']}/3**",
+        color=0xff6b35
     )
     embed.set_thumbnail(url=member.display_avatar.url)
 
-    embed.add_field(name="🏷️ Pseudo", value=f"{member.name}", inline=True)
-    embed.add_field(name="🆔 ID", value=f"`{member.id}`", inline=True)
-    embed.add_field(name="📅 Compte créé", value=created_at, inline=True)
-    embed.add_field(name="📥 A rejoint le", value=joined_at, inline=True)
-    embed.add_field(name="🎭 Rôles", value=roles_text, inline=False)
-    embed.add_field(
-        name="📊 Activité",
-        value=f"{data['activity_status']}\n~{data['avg_per_day']} msgs/jour • {data['total_analyzed']} messages analysés",
-        inline=False
-    )
-    embed.add_field(
-        name="🤖 Appréciation IA",
-        value=data['ai_analysis'],
-        inline=False
-    )
-    embed.set_footer(text=f"Analyse basée sur les {data['total_analyzed']} derniers messages publics")
+    # Si mute permanent → indiquer qu'il peut faire un ticket
+    if duration is None:
+        ticket_ch = get_channel_by_name(guild, "ticket")
+        if ticket_ch:
+            embed.add_field(name="📩 Contestation", value=f"Tu peux ouvrir un ticket dans {ticket_ch.mention} même muté.", inline=False)
 
-    await loading_msg.edit(embed=embed)
+    await ch.send(embed=embed)
+    await log_action(guild, "spam_mute", None, member,
+                     reason="Spam répété (anti-spam automatique)",
+                     extra={"Durée": duration_txt, "Warns": f"{data['warns']}/3"})
 
-async def execute_action(guild, action_data, mod_channel):
+# ============================================================
+# EXECUTE ACTION
+# ============================================================
+async def execute_action(guild, action_data, mod_channel, moderator=None):
     member = action_data.get("resolved_member")
     if not member:
-        await mod_channel.send("❌ Aucun membre résolu pour cette action.")
+        await mod_channel.send("❌ Aucun membre résolu.")
         return
 
     action = action_data.get("action")
     reason = action_data.get("reason", "Aucune raison spécifiée")
+    db = load_db()
+    data = get_member_data(db, member.id)
 
     try:
         if action == "ban":
             await member.ban(reason=reason)
+            data["bans"] += 1
         elif action == "kick":
             await member.kick(reason=reason)
+            data["kicks"] += 1
         elif action == "mute":
             duration = action_data.get("duration_minutes") or 10
             await member.timeout(timedelta(minutes=duration), reason=reason)
+            data["mutes"] += 1
         elif action == "unmute":
             await member.timeout(None)
+            # reset warns si mute anti-spam (3 warns)
+            if data.get("spam_mute_count", 0) >= 3 or data["warns"] >= 3:
+                data["warns"] = 1
+                data["spam_mute_count"] = 0
         elif action == "unban":
             await guild.unban(member)
         elif action == "warn":
+            data["warns"] = min(data["warns"] + 1, 3)
+            data["total_warns"] += 1
             try:
                 await member.send(f"⚠️ Tu as reçu un avertissement sur **{guild.name}** : {reason}")
             except:
@@ -288,6 +370,15 @@ async def execute_action(guild, action_data, mod_channel):
                     await msg.delete()
                     deleted += 1
 
+        if action not in ["unmute", "unban", "delete_messages"]:
+            data["sanctions"].append({
+                "type": action,
+                "reason": reason,
+                "date": datetime.now(timezone.utc).isoformat(),
+                "duration": action_data.get("duration_minutes")
+            })
+        save_db(db)
+
         color = ACTION_COLORS.get(action, 0x2ecc71)
         label = ACTION_LABELS.get(action, action)
         duration = action_data.get("duration_minutes")
@@ -299,19 +390,140 @@ async def execute_action(guild, action_data, mod_channel):
             embed.add_field(name="Durée", value=f"{duration} minutes", inline=True)
         if action not in ["unmute", "unban"]:
             embed.add_field(name="Raison", value=reason, inline=False)
+        if action == "warn":
+            embed.add_field(name="Avertissements", value=f"{data['warns']}/3", inline=True)
         embed.set_footer(text=f"ID : {member.id}")
         await mod_channel.send(embed=embed)
 
+        await log_action(guild, action, moderator, member, reason=reason,
+                         extra={"Durée": f"{duration} min" if duration else None})
+
     except discord.Forbidden:
-        embed = discord.Embed(
+        await mod_channel.send(embed=discord.Embed(
             title="❌ Permission refusée",
             description=f"Je n'ai pas les permissions pour agir sur **{member.display_name}**.",
             color=0xe74c3c
-        )
-        await mod_channel.send(embed=embed)
+        ))
     except Exception as e:
         await mod_channel.send(f"❌ Erreur : {e}")
 
+# ============================================================
+# PROFIL MEMBRE
+# ============================================================
+async def analyze_member_messages(guild, member):
+    messages = []
+    public_channels = [
+        ch for ch in guild.text_channels
+        if ch.permissions_for(guild.default_role).read_messages
+    ]
+    for channel in public_channels:
+        try:
+            async for msg in channel.history(limit=200):
+                if msg.author.id == member.id:
+                    messages.append(msg)
+                if len(messages) >= 50:
+                    break
+        except:
+            continue
+        if len(messages) >= 50:
+            break
+
+    activity_days = defaultdict(int)
+    for msg in messages:
+        day = msg.created_at.strftime("%Y-%m-%d")
+        activity_days[day] += 1
+
+    if activity_days:
+        avg = round(sum(activity_days.values()) / len(activity_days), 1)
+        last = max(activity_days.keys())
+        days_since = (datetime.now() - datetime.strptime(last, "%Y-%m-%d")).days
+        if days_since == 0:
+            status = "🟢 Actif aujourd'hui"
+        elif days_since <= 3:
+            status = f"🟡 Actif il y a {days_since} jours"
+        elif days_since <= 7:
+            status = f"🟠 Peu actif ({days_since} jours)"
+        else:
+            status = f"🔴 Inactif ({days_since} jours)"
+    else:
+        avg, status = 0, "⚫ Aucune activité détectée"
+
+    ai_analysis = "Aucun message à analyser."
+    if messages:
+        msgs_text = "\n".join([f"- {m.content}" for m in messages[:50] if m.content])
+        try:
+            r = ai_client.chat.completions.create(
+                model="openrouter/free",
+                messages=[{"role": "user", "content": f"{ANALYSIS_PROMPT}\n\nMessages :\n{msgs_text}"}]
+            )
+            ai_analysis = r.choices[0].message.content.strip()
+        except:
+            ai_analysis = "Analyse indisponible."
+
+    return {"status": status, "avg": avg, "total": len(messages), "ai": ai_analysis}
+
+async def show_profile(channel, member, guild, show_mod_data=True):
+    loading = discord.Embed(
+        title=f"🔍 Analyse de {member.display_name} en cours...",
+        description="Patiente quelques secondes...",
+        color=0x3498db
+    )
+    msg = await channel.send(embed=loading)
+    data_msg = await analyze_member_messages(guild, member)
+
+    db = load_db()
+    data = get_member_data(db, member.id)
+
+    roles = [r.mention for r in member.roles if r.name != "@everyone"]
+    roles_text = ", ".join(roles) if roles else "Aucun rôle"
+    joined = member.joined_at.strftime("%d/%m/%Y") if member.joined_at else "Inconnu"
+    created = member.created_at.strftime("%d/%m/%Y")
+
+    embed = discord.Embed(title=f"👤 Profil — {member.display_name}", color=0x3498db)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="🏷️ Pseudo", value=f"{member.name}", inline=True)
+    embed.add_field(name="🆔 ID", value=f"`{member.id}`", inline=True)
+    embed.add_field(name="📅 Compte créé", value=created, inline=True)
+    embed.add_field(name="📥 A rejoint le", value=joined, inline=True)
+    embed.add_field(name="🎭 Rôles", value=roles_text, inline=False)
+    embed.add_field(
+        name="📊 Activité",
+        value=f"{data_msg['status']}\n~{data_msg['avg']} msgs/jour • {data_msg['total']} analysés",
+        inline=False
+    )
+    embed.add_field(name="🤖 Appréciation IA", value=data_msg["ai"], inline=False)
+
+    if show_mod_data:
+        embed.add_field(
+            name="🛡️ Sanctions",
+            value=(
+                f"⚠️ Warns actuels : **{data['warns']}/3** (total : {data['total_warns']})\n"
+                f"🔇 Mutes : {data['mutes']} | 👢 Kicks : {data['kicks']} | 🔨 Bans : {data['bans']}"
+            ),
+            inline=False
+        )
+        if data.get("comments"):
+            comments_text = "\n".join([f"• {c}" for c in data["comments"]])
+            embed.add_field(name="💬 Commentaires modos", value=comments_text, inline=False)
+
+    embed.set_footer(text=f"Analyse basée sur {data_msg['total']} messages publics")
+    await msg.edit(embed=embed)
+
+    if show_mod_data:
+        # Boutons pour ajouter/supprimer commentaire
+        action_embed = discord.Embed(
+            title="💬 Gestion des commentaires",
+            description="➕ pour ajouter un commentaire\n➖ pour supprimer un commentaire",
+            color=0x3498db
+        )
+        action_msg = await channel.send(embed=action_embed)
+        await action_msg.add_reaction("➕")
+        await action_msg.add_reaction("➖")
+        waiting_for_action_choice[action_msg.id] = ("comment_mgmt", member, None, None)
+
+# ============================================================
+# CONFIRMATION
+# ============================================================
 async def send_confirmation(channel, action_data, author_id):
     action = action_data.get("action")
     duration = action_data.get("duration_minutes")
@@ -329,7 +541,7 @@ async def send_confirmation(channel, action_data, author_id):
         embed.add_field(name="Durée", value=f"{duration} minutes", inline=True)
     if reason:
         embed.add_field(name="Raison", value=reason, inline=False)
-    embed.set_footer(text="Réagis ✅ pour confirmer ou ❌ pour annuler • Expire dans 30s")
+    embed.set_footer(text="✅ confirmer — ❌ annuler • Expire dans 30s")
 
     bot_msg = await channel.send(embed=embed)
     await bot_msg.add_reaction("✅")
@@ -339,13 +551,15 @@ async def send_confirmation(channel, action_data, author_id):
     await asyncio.sleep(30)
     if bot_msg.id in pending_actions:
         pending_actions.pop(bot_msg.id)
-        expired_embed = discord.Embed(
+        await channel.send(embed=discord.Embed(
             title="⏱️ Confirmation expirée",
-            description="L'action a été annulée automatiquement.",
+            description="Action annulée automatiquement.",
             color=0x95a5a6
-        )
-        await channel.send(embed=expired_embed)
+        ))
 
+# ============================================================
+# CHOIX MEMBRE / ACTION
+# ============================================================
 async def ask_action_choice(channel, member, action_data, author_id):
     embed = discord.Embed(
         title=f"👤 {member.display_name} trouvé !",
@@ -353,15 +567,14 @@ async def ask_action_choice(channel, member, action_data, author_id):
         color=0x3498db
     )
     embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="⚔️ Sanctionner", value="Applique une sanction à ce membre", inline=True)
-    embed.add_field(name="🔍 Voir le profil", value="Analyse complète + appréciation IA", inline=True)
-    embed.set_footer(text="Réagis ⚔️ pour sanctionner ou 🔍 pour voir le profil")
-
+    embed.add_field(name="⚔️ Sanctionner", value="Applique une sanction", inline=True)
+    embed.add_field(name="🔍 Voir le profil", value="Analyse complète + IA", inline=True)
+    embed.set_footer(text="⚔️ sanctionner — 🔍 profil — ❌ annuler")
     bot_msg = await channel.send(embed=embed)
     await bot_msg.add_reaction("⚔️")
     await bot_msg.add_reaction("🔍")
     await bot_msg.add_reaction("❌")
-    waiting_for_action_choice[bot_msg.id] = (member, action_data, author_id)
+    waiting_for_action_choice[bot_msg.id] = ("sanction_or_profile", member, action_data, author_id)
 
 async def ask_member_choice(channel, action_data, author_id, candidates):
     embed = discord.Embed(
@@ -370,13 +583,9 @@ async def ask_member_choice(channel, action_data, author_id, candidates):
         color=0x3498db
     )
     emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
-    for i, member in enumerate(candidates[:5]):
-        embed.add_field(
-            name=f"{emojis[i]} {member.display_name}",
-            value=f"`{member.name}` • ID: {member.id}",
-            inline=False
-        )
-    embed.set_footer(text="Réagis ❌ pour annuler")
+    for i, m in enumerate(candidates[:5]):
+        embed.add_field(name=f"{emojis[i]} {m.display_name}", value=f"`{m.name}` • ID: {m.id}", inline=False)
+    embed.set_footer(text="❌ pour annuler")
     bot_msg = await channel.send(embed=embed)
     for i in range(len(candidates[:5])):
         await bot_msg.add_reaction(emojis[i])
@@ -385,46 +594,44 @@ async def ask_member_choice(channel, action_data, author_id, candidates):
 
 async def handle_member_resolution(channel, action_data, author_id, exact, similar, is_id=False):
     all_candidates = exact + similar
-
-    if len(all_candidates) == 0:
-        embed = discord.Embed(
+    if not all_candidates:
+        await channel.send(embed=discord.Embed(
             title="❌ Membre introuvable",
             description=f"Aucun membre trouvé pour **{action_data.get('target')}**.",
             color=0xe74c3c
-        )
-        await channel.send(embed=embed)
+        ))
         return
 
-    # Si ID exact ou mention → confirmation directe si raison déjà là
     if is_id and len(exact) == 1:
         action_data["resolved_member"] = exact[0]
-        if action_data.get("reason"):
+        if action_data.get("reason") and action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
             await send_confirmation(channel, action_data, author_id)
         elif action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
-            embed = discord.Embed(title="📝 Raison de la sanction", description="Quelle est la raison de cette sanction ?", color=0x3498db)
-            await channel.send(embed=embed)
+            await channel.send(embed=discord.Embed(
+                title="📝 Raison de la sanction",
+                description="Quelle est la raison de cette sanction ?",
+                color=0x3498db
+            ))
             waiting_for_reason[author_id] = action_data
         else:
             await send_confirmation(channel, action_data, author_id)
         return
 
-    # Un seul membre exact trouvé → choix sanctionner ou profil
-    if len(exact) == 1 and len(similar) == 0:
+    if len(exact) == 1 and not similar:
         action_data["resolved_member"] = exact[0]
         await ask_action_choice(channel, exact[0], action_data, author_id)
         return
 
-    # Un seul membre similaire
     if len(all_candidates) == 1:
         action_data["resolved_member"] = all_candidates[0]
-        member = all_candidates[0]
+        m = all_candidates[0]
         embed = discord.Embed(
             title="🔍 Membre similaire trouvé",
-            description=f"Je n'ai pas trouvé **{action_data.get('target')}** exactement.\nVoulais-tu dire **{member.display_name}** ?",
+            description=f"Je n'ai pas trouvé **{action_data.get('target')}** exactement.\nVoulais-tu dire **{m.display_name}** ?",
             color=0xf39c12
         )
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.set_footer(text="Réagis ✅ pour confirmer ou ❌ pour annuler")
+        embed.set_thumbnail(url=m.display_avatar.url)
+        embed.set_footer(text="✅ confirmer — ❌ annuler")
         bot_msg = await channel.send(embed=embed)
         await bot_msg.add_reaction("✅")
         await bot_msg.add_reaction("❌")
@@ -433,92 +640,331 @@ async def handle_member_resolution(channel, action_data, author_id, exact, simil
 
     await ask_member_choice(channel, action_data, author_id, all_candidates)
 
+# ============================================================
+# RAPPORT QUOTIDIEN
+# ============================================================
+async def send_daily_report(guild):
+    report_ch = get_channel_by_name(guild, "rapport-prowler")
+    if not report_ch:
+        return
+
+    db = load_db()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    total_bans = total_kicks = total_mutes = total_warns = 0
+
+    for mid, data in db.items():
+        for s in data.get("sanctions", []):
+            if s.get("date", "").startswith(today):
+                t = s.get("type", "")
+                if t == "ban": total_bans += 1
+                elif t == "kick": total_kicks += 1
+                elif t in ["mute", "spam_mute"]: total_mutes += 1
+                elif t == "warn": total_warns += 1
+
+    embed = discord.Embed(
+        title=f"📝 Rapport de modération — {today}",
+        color=0x3498db,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.add_field(name="🔨 Bans", value=str(total_bans), inline=True)
+    embed.add_field(name="👢 Kicks", value=str(total_kicks), inline=True)
+    embed.add_field(name="🔇 Mutes", value=str(total_mutes), inline=True)
+    embed.add_field(name="⚠️ Warns", value=str(total_warns), inline=True)
+    embed.set_footer(text="Rapport automatique quotidien")
+    await report_ch.send(embed=embed)
+
+async def daily_report_loop():
+    await client.wait_until_ready()
+    while not client.is_closed():
+        now = datetime.now(timezone.utc)
+        next_run = now.replace(hour=REPORT_HOUR, minute=0, second=0, microsecond=0)
+        if now >= next_run:
+            next_run += timedelta(days=1)
+        await asyncio.sleep((next_run - now).total_seconds())
+        for guild in client.guilds:
+            await send_daily_report(guild)
+
+# ============================================================
+# RÔLE MEMBRE ACTIF
+# ============================================================
+async def update_active_roles_loop():
+    await client.wait_until_ready()
+    while not client.is_closed():
+        await asyncio.sleep(3600)  # toutes les heures
+        for guild in client.guilds:
+            role_actif = discord.utils.get(guild.roles, name=ROLE_MEMBRE_ACTIF)
+            role_membre = discord.utils.get(guild.roles, name=ROLE_MEMBRE)
+            if not role_actif or not role_membre:
+                continue
+            today = datetime.now(timezone.utc).date()
+            for mid, days_data in member_message_days.items():
+                member = guild.get_member(int(mid))
+                if not member:
+                    continue
+                # vérifie 2 jours consécutifs avec 10+ messages
+                active_streak = 0
+                for i in range(ACTIVE_DAYS_REQUIRED):
+                    day = (today - timedelta(days=i)).isoformat()
+                    if days_data.get(day, 0) >= ACTIVE_MESSAGES_PER_DAY:
+                        active_streak += 1
+                # vérifie inactivité 2 jours
+                inactive_streak = 0
+                for i in range(INACTIVE_DAYS_REQUIRED):
+                    day = (today - timedelta(days=i)).isoformat()
+                    if days_data.get(day, 0) == 0:
+                        inactive_streak += 1
+
+                has_actif = role_actif in member.roles
+                if active_streak >= ACTIVE_DAYS_REQUIRED and not has_actif:
+                    try:
+                        await member.add_roles(role_actif)
+                        if role_membre in member.roles:
+                            await member.remove_roles(role_membre)
+                    except:
+                        pass
+                elif inactive_streak >= INACTIVE_DAYS_REQUIRED and has_actif:
+                    try:
+                        await member.remove_roles(role_actif)
+                        if role_membre not in member.roles:
+                            await member.add_roles(role_membre)
+                    except:
+                        pass
+
+# ============================================================
+# HELP
+# ============================================================
+async def send_help(channel):
+    channel_name = channel.name.lower().replace("・", "")
+    embed = discord.Embed(color=0x3498db, timestamp=datetime.now(timezone.utc))
+
+    if "modération" in channel_name or "moderation" in channel_name:
+        embed.title = "📖 Commandes — Modération"
+        embed.description = (
+            "Tu peux écrire en **langage naturel** :\n\n"
+            "• `mute @pseudo 30 minutes` — mute un membre\n"
+            "• `ban le dernier qui a spammé` — bannit un membre\n"
+            "• `kick @pseudo` — kick un membre\n"
+            "• `warn @pseudo` — avertit un membre\n"
+            "• `unmute @pseudo` — démute un membre\n"
+            "• `unban @pseudo` — débannit un membre\n"
+            "• `supprime 10 messages de @pseudo` — supprime ses messages\n\n"
+            "Tu peux aussi mentionner directement (`@pseudo`) ou donner l'ID complet avec la raison pour une confirmation directe."
+        )
+    elif "log" in channel_name:
+        embed.title = "📖 Lecture des logs"
+        embed.description = (
+            "Les logs enregistrent automatiquement :\n\n"
+            "🔨 Bans • 👢 Kicks • 🔇 Mutes • ⚠️ Warns\n"
+            "🔊 Demutes • ✅ Débans • 📥 Arrivées • 📤 Départs\n"
+            "💬 Commentaires modos • 🤖 Mutes anti-spam"
+        )
+    else:
+        embed.title = "📖 Aide — Prowler Bot"
+        embed.description = (
+            "**Salons du bot :**\n"
+            "⚠️・modération — commandes de modération\n"
+            "📋・logs — historique des actions\n"
+            "📝・rapport-prowler — rapport quotidien à 22h\n"
+            "💬・chat-général — messages de bienvenue\n\n"
+            "Tape `!help` dans le bon salon pour plus de détails."
+        )
+    embed.set_footer(text="Prowler Bot")
+    await channel.send(embed=embed)
+
+# ============================================================
+# ÉVÉNEMENTS
+# ============================================================
 @client.event
 async def on_ready():
     print(f"✅ Bot connecté en tant que {client.user}")
+    client.loop.create_task(daily_report_loop())
+    client.loop.create_task(update_active_roles_loop())
+
+@client.event
+async def on_member_join(member):
+    guild = member.guild
+
+    # Attribuer rôle Membre
+    role = discord.utils.get(guild.roles, name=ROLE_MEMBRE)
+    if role:
+        try:
+            await member.add_roles(role)
+        except:
+            pass
+
+    # Bienvenue discret dans général
+    general = get_channel_by_name(guild, "chat-général")
+    if general:
+        await general.send(f"👋 Bienvenue sur le serveur, {member.mention} !")
+
+    # Log
+    await log_action(guild, "join", None, member)
+
+@client.event
+async def on_member_remove(member):
+    await log_action(member.guild, "leave", None, member)
 
 @client.event
 async def on_reaction_add(reaction, user):
     if user.bot:
         return
+    msg_id = reaction.message.id
 
-    # Choix sanctionner ou profil
-    if reaction.message.id in waiting_for_action_choice:
-        member, action_data, requester_id = waiting_for_action_choice[reaction.message.id]
-        if user.id != requester_id:
-            return
-        waiting_for_action_choice.pop(reaction.message.id)
+    # --- Gestion action (sanctionner / profil / commentaire) ---
+    if msg_id in waiting_for_action_choice:
+        choice_type, member, action_data, requester_id = waiting_for_action_choice[msg_id]
 
-        if str(reaction.emoji) == "⚔️":
-            if action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
-                embed = discord.Embed(title="📝 Raison de la sanction", description="Quelle est la raison de cette sanction ?", color=0x3498db)
-                await reaction.message.channel.send(embed=embed)
-                waiting_for_reason[requester_id] = action_data
-            else:
-                await send_confirmation(reaction.message.channel, action_data, requester_id)
-        elif str(reaction.emoji) == "🔍":
-            await show_profile(reaction.message.channel, member, reaction.message.guild)
-        elif str(reaction.emoji) == "❌":
-            await reaction.message.channel.send(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))
+        if choice_type == "sanction_or_profile":
+            if user.id != requester_id:
+                return
+            waiting_for_action_choice.pop(msg_id)
+            if str(reaction.emoji) == "⚔️":
+                if action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
+                    await reaction.message.channel.send(embed=discord.Embed(
+                        title="📝 Raison de la sanction",
+                        description="Quelle est la raison de cette sanction ?",
+                        color=0x3498db
+                    ))
+                    waiting_for_reason[requester_id] = action_data
+                else:
+                    await send_confirmation(reaction.message.channel, action_data, requester_id)
+            elif str(reaction.emoji) == "🔍":
+                await show_profile(reaction.message.channel, member, reaction.message.guild)
+            elif str(reaction.emoji) == "❌":
+                await reaction.message.channel.send(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))
+
+        elif choice_type == "comment_mgmt":
+            if not has_permission(user if isinstance(user, discord.Member) else reaction.message.guild.get_member(user.id)):
+                return
+            waiting_for_action_choice.pop(msg_id)
+            mod_member = reaction.message.guild.get_member(user.id)
+            if str(reaction.emoji) == "➕":
+                await reaction.message.channel.send(embed=discord.Embed(
+                    title="💬 Ajouter un commentaire",
+                    description=f"Écris ton commentaire pour **{member.display_name}** :",
+                    color=0x3498db
+                ))
+                waiting_for_comment[user.id] = (member.id, "add", None)
+            elif str(reaction.emoji) == "➖":
+                db = load_db()
+                data = get_member_data(db, member.id)
+                comments = data.get("comments", [])
+                if not comments:
+                    await reaction.message.channel.send("Aucun commentaire à supprimer.")
+                    return
+                emojis_c = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+                embed = discord.Embed(title="🗑️ Supprimer un commentaire", color=0xe74c3c)
+                for i, c in enumerate(comments[:5]):
+                    embed.add_field(name=f"{emojis_c[i]}", value=c, inline=False)
+                cmsg = await reaction.message.channel.send(embed=embed)
+                for i in range(len(comments[:5])):
+                    await cmsg.add_reaction(emojis_c[i])
+                waiting_for_comment[user.id] = (member.id, "remove_pick", cmsg.id)
+                waiting_for_action_choice[cmsg.id] = ("comment_remove_pick", member, None, user.id)
         return
 
-    # Choix de membre
-    if reaction.message.id in waiting_for_member_choice:
-        action_data, requester_id, candidates = waiting_for_member_choice[reaction.message.id]
+    # --- Choix de membre ---
+    if msg_id in waiting_for_member_choice:
+        action_data, requester_id, candidates = waiting_for_member_choice[msg_id]
         if user.id != requester_id:
             return
         emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
         if str(reaction.emoji) == "❌":
-            waiting_for_member_choice.pop(reaction.message.id)
+            waiting_for_member_choice.pop(msg_id)
             await reaction.message.channel.send(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))
             return
         if str(reaction.emoji) in emojis:
             idx = emojis.index(str(reaction.emoji))
             if idx < len(candidates):
-                waiting_for_member_choice.pop(reaction.message.id)
+                waiting_for_member_choice.pop(msg_id)
                 action_data["resolved_member"] = candidates[idx]
                 await ask_action_choice(reaction.message.channel, candidates[idx], action_data, requester_id)
         return
 
-    # Confirmation d'action
-    if reaction.message.id in pending_actions:
-        action_data, requester_id = pending_actions[reaction.message.id]
+    # --- Confirmation d'action ---
+    if msg_id in pending_actions:
+        action_data, requester_id = pending_actions[msg_id]
         if user.id != requester_id:
             return
         if str(reaction.emoji) == "✅":
-            pending_actions.pop(reaction.message.id)
-            await execute_action(reaction.message.guild, action_data, reaction.message.channel)
+            pending_actions.pop(msg_id)
+            mod = reaction.message.guild.get_member(user.id)
+            await execute_action(reaction.message.guild, action_data, reaction.message.channel, moderator=mod)
         elif str(reaction.emoji) == "❌":
-            pending_actions.pop(reaction.message.id)
+            pending_actions.pop(msg_id)
             await reaction.message.channel.send(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))
 
 @client.event
 async def on_message(message):
     if message.author.bot:
         return
-    channel_name = message.channel.name
-    if "modération" not in channel_name and "moderation" not in channel_name:
-        return
-    if not has_permission(message.author):
-        embed = discord.Embed(title="❌ Permission refusée", description="Tu n'as pas la permission d'utiliser le bot de modération.", color=0xe74c3c)
-        await message.channel.send(embed=embed)
+
+    channel_name = message.channel.name.lower().replace("・", "")
+
+    # --- Suivi activité membre ---
+    mid = str(message.author.id)
+    today = datetime.now(timezone.utc).date().isoformat()
+    if mid not in member_message_days:
+        member_message_days[mid] = {}
+    member_message_days[mid][today] = member_message_days[mid].get(today, 0) + 1
+
+    # --- Commande !help ---
+    if message.content.strip().lower() == "!help":
+        await send_help(message.channel)
         return
 
+    # --- Salon modération ---
+    if "modération" not in channel_name and "moderation" not in channel_name:
+        return
+
+    if not has_permission(message.author):
+        await message.channel.send(embed=discord.Embed(
+            title="❌ Permission refusée",
+            description="Tu n'as pas la permission d'utiliser le bot de modération.",
+            color=0xe74c3c
+        ))
+        return
+
+    # --- Attente de commentaire ---
+    if message.author.id in waiting_for_comment:
+        member_id, action, extra = waiting_for_comment[message.author.id]
+        if action == "add":
+            waiting_for_comment.pop(message.author.id)
+            db = load_db()
+            data = get_member_data(db, member_id)
+            comment_text = f"[{datetime.now(timezone.utc).strftime('%d/%m/%Y')}] {message.author.display_name} : {message.content}"
+            data["comments"].append(comment_text)
+            save_db(db)
+            target = message.guild.get_member(member_id)
+            await message.channel.send(embed=discord.Embed(
+                title="✅ Commentaire ajouté", description=comment_text, color=0x2ecc71
+            ))
+            await log_action(message.guild, "comment_add", message.author, target, reason=message.content)
+        return
+
+    # --- Attente de raison ---
     if message.author.id in waiting_for_reason:
         action_data = waiting_for_reason.pop(message.author.id)
         async with message.channel.typing():
-            refined_reason = await reformulate_reason(message.content)
-        action_data["reason"] = refined_reason
+            refined = await reformulate_reason(message.content)
+        action_data["reason"] = refined
         await send_confirmation(message.channel, action_data, message.author.id)
         return
 
+    # --- Anti-spam (pour tous les membres non-modo) ---
+    if not has_permission(message.author):
+        spammed = await check_spam(message)
+        if spammed:
+            return
+
+    # --- Analyse IA de la commande ---
     async with message.channel.typing():
         try:
-            response = ai_client.chat.completions.create(
+            r = ai_client.chat.completions.create(
                 model="openrouter/free",
                 messages=[{"role": "user", "content": f"{SYSTEM_PROMPT}\n\nMessage du modérateur: {message.content}"}]
             )
-            raw = response.choices[0].message.content.strip()
+            raw = r.choices[0].message.content.strip()
             if raw.startswith("```"):
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):

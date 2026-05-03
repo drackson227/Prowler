@@ -8,8 +8,8 @@ from datetime import timedelta
 # ============================================================
 # CONFIG — Remplace ces valeurs par les tiennes
 # ============================================================
-DISCORD_TOKEN = "TON_TOKEN_DISCORD"
-GEMINI_API_KEY = "TA_CLE_GEMINI"
+DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 MODERATION_CHANNEL = "⚠️・modération"
 ALLOWED_ROLES = ["Modérateur"]  # + le propriétaire du serveur
 # ============================================================

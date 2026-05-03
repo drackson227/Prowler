@@ -1,5 +1,5 @@
 import discord
-import google.generativeai as genai
+from google import genai as google_genai
 import os
 import json
 import asyncio
@@ -10,12 +10,10 @@ from datetime import timedelta
 # ============================================================
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-MODERATION_CHANNEL = "⚠️・modération"
 ALLOWED_ROLES = ["Modérateur"]
 # ============================================================
 
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
+client_ai = google_genai.Client(api_key=GEMINI_API_KEY)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -147,8 +145,9 @@ async def on_message(message):
 
     async with message.channel.typing():
         try:
-            response = model.generate_content(
-                f"{SYSTEM_PROMPT}\n\nMessage du modérateur: {message.content}"
+            response = client_ai.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=f"{SYSTEM_PROMPT}\n\nMessage du modérateur: {message.content}"
             )
             raw = response.text.strip()
 

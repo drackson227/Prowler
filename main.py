@@ -82,11 +82,13 @@ def get_member_data(db, member_id):
 SYSTEM_PROMPT = """Tu es un assistant de modération Discord.
 À partir d'un message en langage naturel, tu dois extraire l'action de modération voulue et retourner un JSON.
 
-Actions possibles: ban, kick, mute, warn, delete_messages, unmute, unban, none
+Actions possibles: ban, kick, mute, warn, delete_messages, unmute, unban, show_profile, none
+
+show_profile : quand le modérateur veut voir le profil, les infos, ou revoir un membre (ex: "montre le profil de X", "remontre son profil", "infos sur X", "qui est X", "vérifie X").
 
 Format de réponse JSON uniquement (pas de texte autour) :
 {
-  "action": "ban|kick|mute|warn|delete_messages|unmute|unban|none",
+  "action": "ban|kick|mute|warn|delete_messages|unmute|unban|show_profile|none",
   "target": "mention ou description de l'utilisateur ciblé",
   "duration_minutes": null ou nombre (pour mute),
   "count": null ou nombre (pour delete_messages),
@@ -163,18 +165,33 @@ def find_similar_members(guild, description):
     return exact, [m for _, m in similar if m not in exact][:5]
 
 async def find_member(guild, description, channel):
+    # Retourne (exact, similar, is_id, is_banned)
     if description.strip().isdigit():
-        m = guild.get_member(int(description.strip()))
-        return ([m], [], True) if m else ([], [], True)
-    if description.startswith("<@") and description.endswith(">"):
-        uid = description.strip("<@!>")
+        uid = int(description.strip())
+        m = guild.get_member(uid)
+        if m:
+            return [m], [], True, False
         try:
-            m = guild.get_member(int(uid))
-            return ([m], [], True) if m else ([], [], True)
+            ban_entry = await guild.fetch_ban(discord.Object(id=uid))
+            return [ban_entry.user], [], True, True
+        except discord.NotFound:
+            pass
+        return [], [], True, False
+
+    if description.startswith("<@") and description.endswith(">"):
+        uid_str = description.strip("<@!>")
+        try:
+            uid = int(uid_str)
+            m = guild.get_member(uid)
+            if m:
+                return [m], [], True, False
+            ban_entry = await guild.fetch_ban(discord.Object(id=uid))
+            return [ban_entry.user], [], True, True
         except:
-            return [], [], True
+            return [], [], True, False
+
     exact, similar = find_similar_members(guild, description)
-    return exact, similar, False
+    return exact, similar, False, False
 
 async def reformulate_reason(raw_reason):
     try:
@@ -494,8 +511,28 @@ async def show_profile(channel, member, guild, show_mod_data=True):
     embed.add_field(name="🤖 Appréciation IA", value=data_msg["ai"], inline=False)
 
     if show_mod_data:
+        # Statut de sanction actuelle
+        sanction_status = []
+        if member.is_timed_out():
+            until = member.timed_out_until
+            if until:
+                remaining = until - datetime.now(timezone.utc)
+                mins = int(remaining.total_seconds() // 60)
+                if mins > 1440:
+                    sanction_status.append(f"🔇 **Muté** — {mins // 1440}j {(mins % 1440) // 60}h restantes")
+                elif mins > 60:
+                    sanction_status.append(f"🔇 **Muté** — {mins // 60}h{mins % 60}min restantes")
+                else:
+                    sanction_status.append(f"🔇 **Muté** — {mins} min restantes")
+            else:
+                sanction_status.append("🔇 **Muté** (durée inconnue)")
+
+        if not sanction_status:
+            sanction_status.append("✅ Aucune sanction active")
+
+        embed.add_field(name="⚡ Statut actuel", value="\n".join(sanction_status), inline=False)
         embed.add_field(
-            name="🛡️ Sanctions",
+            name="🛡️ Historique sanctions",
             value=(
                 f"⚠️ Warns actuels : **{data['warns']}/3** (total : {data['total_warns']})\n"
                 f"🔇 Mutes : {data['mutes']} | 👢 Kicks : {data['kicks']} | 🔨 Bans : {data['bans']}"
@@ -592,7 +629,7 @@ async def ask_member_choice(channel, action_data, author_id, candidates):
     await bot_msg.add_reaction("❌")
     waiting_for_member_choice[bot_msg.id] = (action_data, author_id, candidates[:5])
 
-async def handle_member_resolution(channel, action_data, author_id, exact, similar, is_id=False):
+async def handle_member_resolution(channel, action_data, author_id, exact, similar, is_id=False, is_banned=False):
     all_candidates = exact + similar
     if not all_candidates:
         await channel.send(embed=discord.Embed(
@@ -604,6 +641,29 @@ async def handle_member_resolution(channel, action_data, author_id, exact, simil
 
     if is_id and len(exact) == 1:
         action_data["resolved_member"] = exact[0]
+        action_data["is_banned"] = is_banned
+
+        if is_banned:
+            # Personne bannie : seul unban ou show_profile disponibles
+            user = exact[0]
+            embed = discord.Embed(
+                title=f"🔨 {user.display_name} est banni",
+                description="Cet utilisateur est actuellement banni du serveur.",
+                color=0xe74c3c
+            )
+            embed.set_thumbnail(url=user.display_avatar.url)
+            embed.add_field(name="🆔 ID", value=f"`{user.id}`", inline=True)
+            embed.set_footer(text="✅ débannir — 🔍 voir profil — ❌ annuler")
+            bot_msg = await channel.send(embed=embed)
+            await bot_msg.add_reaction("✅")
+            await bot_msg.add_reaction("🔍")
+            await bot_msg.add_reaction("❌")
+            waiting_for_action_choice[bot_msg.id] = ("banned_choice", user, action_data, author_id)
+            return
+
+        if action_data.get("action") == "show_profile":
+            await show_profile(channel, exact[0], channel.guild)
+            return
         if action_data.get("reason") and action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
             await send_confirmation(channel, action_data, author_id)
         elif action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
@@ -619,6 +679,9 @@ async def handle_member_resolution(channel, action_data, author_id, exact, simil
 
     if len(exact) == 1 and not similar:
         action_data["resolved_member"] = exact[0]
+        if action_data.get("action") == "show_profile":
+            await show_profile(channel, exact[0], exact[0].guild)
+            return
         await ask_action_choice(channel, exact[0], action_data, author_id)
         return
 
@@ -814,6 +877,37 @@ async def on_reaction_add(reaction, user):
     if msg_id in waiting_for_action_choice:
         choice_type, member, action_data, requester_id = waiting_for_action_choice[msg_id]
 
+        if choice_type == "banned_choice":
+            if user.id != requester_id:
+                waiting_for_action_choice[msg_id] = (choice_type, member, action_data, requester_id)
+                return
+            if str(reaction.emoji) == "✅":
+                action_data["action"] = "unban"
+                await send_confirmation(reaction.message.channel, action_data, requester_id)
+            elif str(reaction.emoji) == "🔍":
+                # Profil limité pour un banni (pas de membre Discord)
+                db = load_db()
+                data = get_member_data(db, member.id)
+                embed = discord.Embed(title=f"👤 Profil (banni) — {member.display_name}", color=0xe74c3c)
+                embed.set_thumbnail(url=member.display_avatar.url)
+                embed.add_field(name="🏷️ Pseudo", value=f"{member.name}", inline=True)
+                embed.add_field(name="🆔 ID", value=f"`{member.id}`", inline=True)
+                embed.add_field(name="⚡ Statut actuel", value="🔨 **Banni du serveur**", inline=False)
+                embed.add_field(
+                    name="🛡️ Historique sanctions",
+                    value=(
+                        f"⚠️ Warns total : {data['total_warns']}\n"
+                        f"🔇 Mutes : {data['mutes']} | 👢 Kicks : {data['kicks']} | 🔨 Bans : {data['bans']}"
+                    ),
+                    inline=False
+                )
+                if data.get("comments"):
+                    embed.add_field(name="💬 Commentaires modos", value="\n".join([f"• {c}" for c in data["comments"]]), inline=False)
+                await reaction.message.channel.send(embed=embed)
+            elif str(reaction.emoji) == "❌":
+                await reaction.message.channel.send(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))
+            return
+
         if choice_type == "sanction_or_profile":
             if user.id != requester_id:
                 return
@@ -939,7 +1033,7 @@ async def on_message(message):
             await message.channel.send(embed=discord.Embed(
                 title="✅ Commentaire ajouté", description=comment_text, color=0x2ecc71
             ))
-            await log_action(message.guild, "comment_add", message.author, target, reason=message.content)
+            await log_action(message.guild, "comment_add", message.author, target, extra={"Commentaire": message.content})
         return
 
     # --- Attente de raison ---
@@ -977,11 +1071,14 @@ async def on_message(message):
 
     if action_data.get("action") == "none":
         return
+    if action_data.get("action") == "show_profile" and not action_data.get("target"):
+        await message.channel.send("❓ De quel membre veux-tu voir le profil ?")
+        return
     if action_data.get("needs_clarification"):
         await message.channel.send(f"❓ {action_data.get('clarification_question')}")
         return
 
-    exact, similar, is_id = await find_member(message.guild, action_data.get("target", ""), message.channel)
-    await handle_member_resolution(message.channel, action_data, message.author.id, exact, similar, is_id)
+    exact, similar, is_id, is_banned = await find_member(message.guild, action_data.get("target", ""), message.channel)
+    await handle_member_resolution(message.channel, action_data, message.author.id, exact, similar, is_id, is_banned)
 
 client.run(DISCORD_TOKEN)

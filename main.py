@@ -1026,7 +1026,7 @@ async def on_message(message):
     member_message_days[mid][today] = member_message_days[mid].get(today, 0) + 1
 
     # --- Commande !help ---
-    if message.content.strip().lower() == "!help":
+    if message.content.strip().lower() in ["!help", "?help"]:
         await send_help(message.channel)
         return
 

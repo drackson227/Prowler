@@ -227,14 +227,14 @@ async def log_action(guild, action, moderator, target, reason=None, extra=None):
         "unmute": 0x2ecc71, "unban": 0x2ecc71, "warn": 0xf1c40f,
         "spam_mute": 0xff6b35, "join": 0x2ecc71, "leave": 0x95a5a6,
         "comment_add": 0x3498db, "comment_remove": 0xe74c3c,
-        "delete_messages": 0x9b59b6,
+        "delete_messages": 0x9b59b6, "show_profile": 0x95a5a6,
     }
     labels = {
         "ban": "🔨 Bannissement", "kick": "👢 Kick", "mute": "🔇 Mute",
         "unmute": "🔊 Demute", "unban": "✅ Déban", "warn": "⚠️ Avertissement",
         "spam_mute": "🤖 Mute anti-spam", "join": "📥 Arrivée", "leave": "📤 Départ",
         "comment_add": "💬 Commentaire ajouté", "comment_remove": "🗑️ Commentaire supprimé",
-        "delete_messages": "🗑️ Messages supprimés",
+        "delete_messages": "🗑️ Messages supprimés", "show_profile": "🔍 Profil consulté",
     }
     embed = discord.Embed(
         title=labels.get(action, action),
@@ -349,6 +349,13 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
         return
 
     action = action_data.get("action")
+
+    # show_profile ne doit jamais passer par execute_action comme sanction
+    if action == "show_profile":
+        await show_profile(mod_channel, member, guild)
+        await log_action(guild, "show_profile", moderator, member)
+        return
+
     reason = action_data.get("reason", "Aucune raison spécifiée")
     db = load_db()
     data = get_member_data(db, member.id)
@@ -387,7 +394,7 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
                     await msg.delete()
                     deleted += 1
 
-        if action not in ["unmute", "unban", "delete_messages"]:
+        if action not in ["unmute", "unban", "delete_messages", "show_profile"]:
             data["sanctions"].append({
                 "type": action,
                 "reason": reason,
@@ -405,15 +412,16 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
         embed.add_field(name="Utilisateur", value=f"{member.mention}", inline=True)
         if duration and action == "mute":
             embed.add_field(name="Durée", value=f"{duration} minutes", inline=True)
-        if action not in ["unmute", "unban"]:
+        if action not in ["unmute", "unban", "show_profile"]:
             embed.add_field(name="Raison", value=reason, inline=False)
         if action == "warn":
             embed.add_field(name="Avertissements", value=f"{data['warns']}/3", inline=True)
         embed.set_footer(text=f"ID : {member.id}")
         await mod_channel.send(embed=embed)
 
-        await log_action(guild, action, moderator, member, reason=reason,
-                         extra={"Durée": f"{duration} min" if duration else None})
+        if action != "show_profile":
+            await log_action(guild, action, moderator, member, reason=reason,
+                             extra={"Durée": f"{duration} min" if duration else None})
 
     except discord.Forbidden:
         await mod_channel.send(embed=discord.Embed(

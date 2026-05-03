@@ -2,6 +2,7 @@ import discord
 import os
 import json
 import asyncio
+import random
 import re
 from datetime import timedelta, datetime, timezone
 from openai import OpenAI
@@ -28,9 +29,52 @@ INACTIVE_DAYS_REQUIRED = 2
 
 SPAM_THRESHOLD = 10
 SPAM_WINDOW = 30
+
+# XP & pièces
+XP_PER_MESSAGE = 10
+COINS_PER_MESSAGE = 1
+COINS_BOOST = 2
+BOOST_INTERVAL = 300      # 1 message toutes les 5 min pendant le boost
+BOOST_DURATION = 1800     # 30 min
+BOOST_INACTIVE = 360      # perdu après 6 min d'inactivité
+
+# Boutique rotative
+SHOP_ROTATE_INTERVAL = 10800  # 3h
+
+# Gacha
+GACHA_COST = 50
+
+# Daily streak multipliers
+STREAK_MULTIPLIERS = {3: 1.5, 7: 2.0, 14: 2.5, 30: 3.0}
+DAILY_BASE_COINS = 50
 # ============================================================
 
 ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
+
+# Modèles gratuits en ordre de priorité (fallback automatique si rate limit)
+FREE_MODELS = [
+    "google/gemma-3-4b-it:free",
+    "meta-llama/llama-3.2-3b-instruct:free",
+    "microsoft/phi-3-mini-128k-instruct:free",
+    "mistralai/mistral-7b-instruct:free",
+]
+
+def ai_complete(messages):
+    """Appel IA avec fallback automatique sur plusieurs modèles gratuits."""
+    for model in FREE_MODELS:
+        try:
+            r = ai_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=500
+            )
+            return r.choices[0].message.content.strip()
+        except Exception as e:
+            err = str(e)
+            if "429" in err or "rate limit" in err.lower() or "Rate limit" in err:
+                continue  # essaie le modèle suivant
+            raise  # autre erreur → on la remonte
+    return None  # tous les modèles épuisés
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -47,6 +91,7 @@ waiting_for_action_choice = {}
 waiting_for_comment = {}
 spam_tracker = {}
 member_message_days = {}
+boost_tracker = {}
 
 # ---------- DB JSON simple ----------
 DB_FILE = "db.json"
@@ -72,9 +117,149 @@ def get_member_data(db, member_id):
             "bans": 0,
             "spam_mute_count": 0,
             "comments": [],
-            "sanctions": []
+            "sanctions": [],
+            "xp": 0,
+            "level": 0,
+            "coins": 0,
+            "inventory": [],
+            "equipped": [],
+            "daily_streak": 0,
+            "last_daily": None,
+            "godfather": None,
+            "subscriptions": []
         }
+    for key, default in [
+        ("xp", 0), ("level", 0), ("coins", 0), ("inventory", []),
+        ("equipped", []), ("daily_streak", 0), ("last_daily", None),
+        ("godfather", None), ("subscriptions", [])
+    ]:
+        if key not in db[mid]:
+            db[mid][key] = default
     return db[mid]
+
+# ============================================================
+# BOUTIQUE
+# ============================================================
+SHOP_FILE = "shop.json"
+
+DEFAULT_SHOP = {
+    "standard": [
+        {"id": "role_bleu", "name": "Rôle Bleu", "type": "role_color", "price": 200, "duration": None},
+        {"id": "role_rouge", "name": "Rôle Rouge", "type": "role_color", "price": 200, "duration": None},
+        {"id": "role_vert", "name": "Rôle Vert", "type": "role_color", "price": 200, "duration": None},
+        {"id": "role_violet", "name": "Rôle Violet", "type": "role_color", "price": 200, "duration": None},
+        {"id": "role_orange", "name": "Rôle Orange", "type": "role_color", "price": 200, "duration": None},
+        {"id": "role_bleu_temp", "name": "Rôle Bleu (1 semaine)", "type": "role_color_temp", "price": 80, "duration": 7},
+        {"id": "role_rouge_temp", "name": "Rôle Rouge (1 semaine)", "type": "role_color_temp", "price": 80, "duration": 7},
+    ],
+    "gacha": [
+        {"id": "role_gold", "name": "🌟 Rôle Gold", "type": "role_color", "price": 0, "rarity": "légendaire"},
+        {"id": "role_arc_en_ciel", "name": "🌈 Rôle Arc-en-ciel", "type": "role_color", "price": 0, "rarity": "épique"},
+        {"id": "role_noir", "name": "🖤 Rôle Noir", "type": "role_color", "price": 0, "rarity": "rare"},
+        {"id": "role_rose", "name": "🌸 Rôle Rose", "type": "role_color", "price": 0, "rarity": "commun"},
+    ],
+    "rotating": [],
+    "last_rotate": None
+}
+
+ROTATING_POOL = [
+    {"id": "role_cyan", "name": "Rôle Cyan", "type": "role_color", "price": 150, "duration": None},
+    {"id": "role_jaune", "name": "Rôle Jaune", "type": "role_color", "price": 150, "duration": None},
+    {"id": "role_magenta", "name": "Rôle Magenta", "type": "role_color", "price": 150, "duration": None},
+    {"id": "role_blanc", "name": "Rôle Blanc", "type": "role_color", "price": 120, "duration": None},
+    {"id": "role_turquoise", "name": "Rôle Turquoise", "type": "role_color", "price": 130, "duration": None},
+    {"id": "role_corail", "name": "Rôle Corail", "type": "role_color", "price": 130, "duration": None},
+]
+
+def load_shop():
+    if os.path.exists(SHOP_FILE):
+        with open(SHOP_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    save_shop(DEFAULT_SHOP)
+    return DEFAULT_SHOP
+
+def save_shop(shop):
+    with open(SHOP_FILE, "w", encoding="utf-8") as f:
+        json.dump(shop, f, ensure_ascii=False, indent=2)
+
+def rotate_shop():
+    shop = load_shop()
+    new_rotating = random.sample(ROTATING_POOL, min(3, len(ROTATING_POOL)))
+    shop["rotating"] = new_rotating
+    shop["last_rotate"] = datetime.now(timezone.utc).isoformat()
+    save_shop(shop)
+    return new_rotating
+
+# ============================================================
+# XP & NIVEAUX
+# ============================================================
+def xp_for_level(level):
+    return int(100 * (1.1 ** level))
+
+def get_level_from_xp(xp):
+    level = 0
+    total = 0
+    while True:
+        needed = xp_for_level(level)
+        if total + needed > xp:
+            return level, xp - total, needed
+        total += needed
+        level += 1
+
+async def add_xp_and_coins(member, guild, xp_gain, coin_gain):
+    db = load_db()
+    data = get_member_data(db, member.id)
+
+    old_level = data["level"]
+    data["xp"] += xp_gain
+    data["coins"] += coin_gain
+
+    new_level, current_xp, needed_xp = get_level_from_xp(data["xp"])
+    data["level"] = new_level
+    save_db(db)
+
+    if new_level > old_level:
+        try:
+            embed = discord.Embed(
+                title="🎉 Level Up !",
+                description=f"Tu es maintenant **niveau {new_level}** sur **{guild.name}** !",
+                color=0xf1c40f
+            )
+            embed.add_field(name="✨ XP total", value=str(data["xp"]), inline=True)
+            embed.add_field(name="🪙 Pièces", value=str(data["coins"]), inline=True)
+            await member.send(embed=embed)
+        except:
+            pass
+
+# ============================================================
+# BOOST
+# ============================================================
+def check_boost(member_id):
+    now = datetime.now(timezone.utc).timestamp()
+    tracker = boost_tracker.get(member_id)
+    if not tracker:
+        return False
+    if now - tracker["last_msg"] > BOOST_INACTIVE:
+        boost_tracker.pop(member_id, None)
+        return False
+    if now - tracker["start"] > BOOST_DURATION:
+        boost_tracker.pop(member_id, None)
+        return False
+    return tracker.get("active", False)
+
+def update_boost(member_id):
+    now = datetime.now(timezone.utc).timestamp()
+    tracker = boost_tracker.get(member_id, {"active": False, "last_msg": now, "start": now, "msg_count": 0, "last_boost_msg": 0})
+    if now - tracker["last_msg"] > BOOST_INACTIVE:
+        tracker = {"active": False, "last_msg": now, "start": now, "msg_count": 0, "last_boost_msg": 0}
+    tracker["last_msg"] = now
+    tracker["msg_count"] += 1
+    if not tracker["active"] and now - tracker.get("last_boost_msg", 0) >= BOOST_INTERVAL:
+        tracker["last_boost_msg"] = now
+        tracker["active"] = True
+        tracker["start"] = now
+    boost_tracker[member_id] = tracker
+    return tracker.get("active", False)
 
 # ============================================================
 # PROMPTS IA
@@ -133,6 +318,13 @@ ACTION_LABELS = {
     "ban": "🔨 Bannissement", "kick": "👢 Kick", "mute": "🔇 Mute",
     "unmute": "🔊 Demute", "unban": "✅ Déban", "warn": "⚠️ Avertissement",
     "delete_messages": "🗑️ Suppression de messages",
+}
+
+RARITY_COLORS = {
+    "légendaire": 0xf1c40f,
+    "épique": 0x9b59b6,
+    "rare": 0x3498db,
+    "commun": 0x95a5a6
 }
 
 # ============================================================
@@ -194,11 +386,8 @@ async def find_member(guild, description, channel):
 
 async def reformulate_reason(raw_reason):
     try:
-        r = ai_client.chat.completions.create(
-            model="google/gemma-3-4b-it:free",
-            messages=[{"role": "user", "content": f"{REASON_PROMPT}\n\nRaison brute : {raw_reason}"}]
-        )
-        return r.choices[0].message.content.strip()
+        result = ai_complete([{"role": "user", "content": f"{REASON_PROMPT}\n\nRaison brute : {raw_reason}"}])
+        return result if result else raw_reason
     except:
         return raw_reason
 
@@ -227,6 +416,8 @@ async def log_action(guild, action, moderator, target, reason=None, extra=None):
         "spam_mute": 0xff6b35, "join": 0x2ecc71, "leave": 0x95a5a6,
         "comment_add": 0x3498db, "comment_remove": 0xe74c3c,
         "delete_messages": 0x9b59b6, "show_profile": 0x95a5a6,
+        "shop_buy": 0x2ecc71, "shop_equip": 0x3498db, "gacha": 0xf1c40f,
+        "daily": 0xf39c12,
     }
     labels = {
         "ban": "🔨 Bannissement", "kick": "👢 Kick", "mute": "🔇 Mute",
@@ -234,6 +425,8 @@ async def log_action(guild, action, moderator, target, reason=None, extra=None):
         "spam_mute": "🤖 Mute anti-spam", "join": "📥 Arrivée", "leave": "📤 Départ",
         "comment_add": "💬 Commentaire ajouté", "comment_remove": "🗑️ Commentaire supprimé",
         "delete_messages": "🗑️ Messages supprimés", "show_profile": "🔍 Profil consulté",
+        "shop_buy": "🛒 Achat boutique", "shop_equip": "👗 Équipement",
+        "gacha": "🎰 Gacha", "daily": "🎁 Daily",
     }
     embed = discord.Embed(
         title=labels.get(action, action),
@@ -249,7 +442,8 @@ async def log_action(guild, action, moderator, target, reason=None, extra=None):
         embed.add_field(name="Raison", value=reason, inline=False)
     if extra:
         for k, v in extra.items():
-            embed.add_field(name=k, value=str(v), inline=True)
+            if v is not None:
+                embed.add_field(name=k, value=str(v), inline=True)
     await log_ch.send(embed=embed)
 
 # ============================================================
@@ -473,11 +667,8 @@ async def analyze_member_messages(guild, member):
     if messages:
         msgs_text = "\n".join([f"- {m.content}" for m in messages[:50] if m.content])
         try:
-            r = ai_client.chat.completions.create(
-                model="google/gemma-3-4b-it:free",
-                messages=[{"role": "user", "content": f"{ANALYSIS_PROMPT}\n\nMessages :\n{msgs_text}"}]
-            )
-            ai_analysis = r.choices[0].message.content.strip()
+            result = ai_complete([{"role": "user", "content": f"{ANALYSIS_PROMPT}\n\nMessages :\n{msgs_text}"}])
+            ai_analysis = result if result else "Analyse indisponible (limite quotidienne atteinte)."
         except:
             ai_analysis = "Analyse indisponible."
 
@@ -500,6 +691,10 @@ async def show_profile(channel, member, guild, show_mod_data=True):
     joined = member.joined_at.strftime("%d/%m/%Y") if member.joined_at else "Inconnu"
     created = member.created_at.strftime("%d/%m/%Y")
 
+    level, current_xp, needed_xp = get_level_from_xp(data["xp"])
+    progress = int((current_xp / needed_xp) * 10) if needed_xp > 0 else 0
+    progress_bar = "█" * progress + "░" * (10 - progress)
+
     embed = discord.Embed(title=f"👤 Profil — {member.display_name}", color=0x3498db)
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.add_field(name="🏷️ Pseudo", value=f"{member.name}", inline=True)
@@ -507,6 +702,17 @@ async def show_profile(channel, member, guild, show_mod_data=True):
     embed.add_field(name="📅 Compte créé", value=created, inline=True)
     embed.add_field(name="📥 A rejoint le", value=joined, inline=True)
     embed.add_field(name="🎭 Rôles", value=roles_text, inline=False)
+    embed.add_field(
+        name="⭐ Niveau & XP",
+        value=f"Niveau **{level}** — {current_xp}/{needed_xp} XP\n`{progress_bar}`",
+        inline=False
+    )
+    embed.add_field(name="🪙 Pièces", value=str(data["coins"]), inline=True)
+    embed.add_field(name="🔥 Streak daily", value=f"{data['daily_streak']} jours", inline=True)
+
+    equipped = data.get("equipped", [])
+    embed.add_field(name="👗 Rôle équipé", value=", ".join(equipped) if equipped else "Aucun", inline=True)
+
     embed.add_field(
         name="📊 Activité",
         value=f"{data_msg['status']}\n~{data_msg['avg']} msgs/jour • {data_msg['total']} analysés",
@@ -529,7 +735,6 @@ async def show_profile(channel, member, guild, show_mod_data=True):
                     sanction_status.append(f"🔇 **Muté** — {mins} min restantes")
             else:
                 sanction_status.append("🔇 **Muté** (durée inconnue)")
-
         if not sanction_status:
             sanction_status.append("✅ Aucune sanction active")
 
@@ -559,6 +764,280 @@ async def show_profile(channel, member, guild, show_mod_data=True):
         await action_msg.add_reaction("➕")
         await action_msg.add_reaction("➖")
         waiting_for_action_choice[action_msg.id] = ("comment_mgmt", member, None, None)
+
+# ============================================================
+# COMMANDES BOUTIQUE / JEUX
+# ============================================================
+async def cmd_profil(message):
+    db = load_db()
+    data = get_member_data(db, message.author.id)
+    level, current_xp, needed_xp = get_level_from_xp(data["xp"])
+    progress = int((current_xp / needed_xp) * 10) if needed_xp > 0 else 0
+    progress_bar = "█" * progress + "░" * (10 - progress)
+
+    embed = discord.Embed(title=f"👤 Profil — {message.author.display_name}", color=0x3498db)
+    embed.set_thumbnail(url=message.author.display_avatar.url)
+    embed.add_field(name="⭐ Niveau", value=str(level), inline=True)
+    embed.add_field(name="✨ XP", value=f"{current_xp}/{needed_xp}", inline=True)
+    embed.add_field(name="🪙 Pièces", value=str(data["coins"]), inline=True)
+    embed.add_field(name="📊 Progression", value=f"`{progress_bar}`", inline=False)
+    embed.add_field(name="🔥 Streak daily", value=f"{data['daily_streak']} jours", inline=True)
+    equipped = data.get("equipped", [])
+    embed.add_field(name="👗 Rôle équipé", value=", ".join(equipped) if equipped else "Aucun", inline=True)
+    await message.channel.send(embed=embed)
+
+async def cmd_inventaire(message):
+    db = load_db()
+    data = get_member_data(db, message.author.id)
+    inventory = data.get("inventory", [])
+
+    embed = discord.Embed(title=f"🎒 Inventaire — {message.author.display_name}", color=0x9b59b6)
+    if not inventory:
+        embed.description = "Tu n'as aucun article dans ton inventaire."
+    else:
+        items_text = "\n".join([
+            f"• **{item['name']}**" + (f" — expire le {item.get('expires', '?')}" if item.get('expires') else "")
+            for item in inventory
+        ])
+        embed.description = items_text
+    await message.channel.send(embed=embed)
+
+async def cmd_boutique(message):
+    shop = load_shop()
+    embed = discord.Embed(title="🛍️ Boutique", color=0x2ecc71)
+
+    standard_text = "\n".join([f"• **{i['name']}** — {i['price']} 🪙" for i in shop["standard"]])
+    embed.add_field(name="📦 Articles permanents", value=standard_text or "Aucun", inline=False)
+
+    if shop["rotating"]:
+        last = shop.get("last_rotate")
+        if last:
+            dt = datetime.fromisoformat(last)
+            next_rotate = dt + timedelta(seconds=SHOP_ROTATE_INTERVAL)
+            remaining = next_rotate - datetime.now(timezone.utc)
+            mins = int(remaining.total_seconds() // 60)
+            rotate_txt = f"Se renouvelle dans **{mins // 60}h{mins % 60}min**"
+        else:
+            rotate_txt = ""
+        rotating_text = "\n".join([f"• **{i['name']}** — {i['price']} 🪙" for i in shop["rotating"]])
+        embed.add_field(name=f"🔄 Boutique rotative — {rotate_txt}", value=rotating_text, inline=False)
+
+    embed.set_footer(text="!acheter [nom] pour acheter • !spin pour le gacha (50 🪙)")
+    await message.channel.send(embed=embed)
+
+async def cmd_acheter(message, item_name):
+    if not item_name:
+        await message.channel.send("❌ Usage : `!acheter [nom de l'article]`")
+        return
+
+    shop = load_shop()
+    all_items = shop["standard"] + shop["rotating"]
+    item = next((i for i in all_items if i["name"].lower() == item_name.lower()), None)
+
+    if not item:
+        await message.channel.send(f"❌ Article **{item_name}** introuvable dans la boutique.")
+        return
+
+    db = load_db()
+    data = get_member_data(db, message.author.id)
+
+    if data["coins"] < item["price"]:
+        await message.channel.send(f"❌ Tu n'as pas assez de pièces. (Tu as **{data['coins']}** 🪙, il faut **{item['price']}** 🪙)")
+        return
+
+    if item.get("duration") is None:
+        already = any(i["id"] == item["id"] for i in data["inventory"])
+        if already:
+            await message.channel.send(f"❌ Tu possèdes déjà **{item['name']}**.")
+            return
+
+    data["coins"] -= item["price"]
+    inv_item = {"id": item["id"], "name": item["name"], "type": item["type"]}
+    if item.get("duration"):
+        expires = (datetime.now(timezone.utc) + timedelta(days=item["duration"])).strftime("%d/%m/%Y")
+        inv_item["expires"] = expires
+    data["inventory"].append(inv_item)
+    save_db(db)
+
+    embed = discord.Embed(
+        title="✅ Achat réussi !",
+        description=f"Tu as acheté **{item['name']}** pour **{item['price']}** 🪙\nSolde restant : **{data['coins']}** 🪙",
+        color=0x2ecc71
+    )
+    await message.channel.send(embed=embed)
+    await log_action(message.guild, "shop_buy", None, message.author, extra={"Article": item["name"], "Prix": f"{item['price']} 🪙"})
+
+async def cmd_equiper(message, item_name):
+    if not item_name:
+        await message.channel.send("❌ Usage : `!équiper [nom du rôle]`")
+        return
+
+    db = load_db()
+    data = get_member_data(db, message.author.id)
+    inventory = data.get("inventory", [])
+
+    item = next((i for i in inventory if i["name"].lower() == item_name.lower()), None)
+    if not item:
+        await message.channel.send(f"❌ Tu ne possèdes pas **{item_name}**. Achète-le d'abord !")
+        return
+
+    data["equipped"] = [item["name"]]
+    save_db(db)
+
+    embed = discord.Embed(
+        title="👗 Rôle équipé !",
+        description=f"Tu as équipé **{item['name']}**.\n⚠️ Demande à un modo d'attribuer le rôle Discord correspondant.",
+        color=0x3498db
+    )
+    await message.channel.send(embed=embed)
+    await log_action(message.guild, "shop_equip", None, message.author, extra={"Rôle équipé": item["name"]})
+
+async def cmd_spin(message):
+    db = load_db()
+    data = get_member_data(db, message.author.id)
+
+    if data["coins"] < GACHA_COST:
+        await message.channel.send(f"❌ Tu n'as pas assez de pièces pour le gacha. (Tu as **{data['coins']}** 🪙, il faut **{GACHA_COST}** 🪙)")
+        return
+
+    shop = load_shop()
+    gacha_pool = shop["gacha"]
+    if not gacha_pool:
+        await message.channel.send("❌ Le gacha est vide pour l'instant.")
+        return
+
+    weights = []
+    for item in gacha_pool:
+        r = item.get("rarity", "commun")
+        if r == "légendaire": weights.append(2)
+        elif r == "épique": weights.append(8)
+        elif r == "rare": weights.append(20)
+        else: weights.append(70)
+
+    won_item = random.choices(gacha_pool, weights=weights, k=1)[0]
+    data["coins"] -= GACHA_COST
+
+    already = any(i["id"] == won_item["id"] for i in data["inventory"])
+    if not already:
+        data["inventory"].append({"id": won_item["id"], "name": won_item["name"], "type": won_item["type"]})
+        result_txt = f"Tu as obtenu **{won_item['name']}** !"
+    else:
+        refund = 10
+        data["coins"] += refund
+        result_txt = f"Tu as obtenu **{won_item['name']}** (déjà possédé → **+{refund}** 🪙 remboursés)"
+
+    save_db(db)
+
+    rarity = won_item.get("rarity", "commun")
+    color = RARITY_COLORS.get(rarity, 0x95a5a6)
+    embed = discord.Embed(title="🎰 Résultat du Gacha !", color=color)
+    embed.add_field(name="🎁 Récompense", value=result_txt, inline=False)
+    embed.add_field(name="✨ Rareté", value=rarity.capitalize(), inline=True)
+    embed.add_field(name="🪙 Solde", value=str(data["coins"]), inline=True)
+    embed.set_footer(text=f"Coût : {GACHA_COST} 🪙")
+    await message.channel.send(embed=embed)
+    await log_action(message.guild, "gacha", None, message.author, extra={"Obtenu": won_item["name"], "Rareté": rarity})
+
+async def cmd_classement(message):
+    db = load_db()
+    members_data = []
+    for mid, data in db.items():
+        member = message.guild.get_member(int(mid))
+        if member:
+            level, _, _ = get_level_from_xp(data.get("xp", 0))
+            members_data.append((member.display_name, level, data.get("xp", 0), data.get("coins", 0)))
+
+    members_data.sort(key=lambda x: x[2], reverse=True)
+    top = members_data[:10]
+
+    embed = discord.Embed(title="🏆 Classement — Top 10", color=0xf1c40f)
+    medals = ["🥇", "🥈", "🥉"] + ["4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    lines = []
+    for i, (name, level, xp, coins) in enumerate(top):
+        lines.append(f"{medals[i]} **{name}** — Niv. {level} • {xp} XP • {coins} 🪙")
+    embed.description = "\n".join(lines) if lines else "Aucun membre classé."
+    await message.channel.send(embed=embed)
+
+async def cmd_daily(message):
+    channel_name = message.channel.name.lower().replace("・", "")
+    if "daily" not in channel_name:
+        daily_ch = get_channel_by_name(message.guild, "daily")
+        if daily_ch:
+            await message.channel.send(f"❌ La commande `!daily` est réservée à {daily_ch.mention} !")
+        return
+
+    db = load_db()
+    data = get_member_data(db, message.author.id)
+    now = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d")
+    last = data.get("last_daily")
+
+    if last == today:
+        await message.channel.send(f"⏳ Tu as déjà récupéré ta récompense aujourd'hui ! Reviens demain.")
+        return
+
+    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    if last == yesterday:
+        data["daily_streak"] += 1
+    else:
+        data["daily_streak"] = 1
+
+    streak = data["daily_streak"]
+    multiplier = 1.0
+    for days, mult in sorted(STREAK_MULTIPLIERS.items()):
+        if streak >= days:
+            multiplier = mult
+
+    coins_earned = int(DAILY_BASE_COINS * multiplier)
+    xp_earned = int(20 * multiplier)
+    data["coins"] += coins_earned
+    data["xp"] += xp_earned
+    data["last_daily"] = today
+    save_db(db)
+
+    embed = discord.Embed(title="🎁 Récompense quotidienne !", color=0xf39c12)
+    embed.set_thumbnail(url=message.author.display_avatar.url)
+    embed.add_field(name="🪙 Pièces gagnées", value=str(coins_earned), inline=True)
+    embed.add_field(name="✨ XP gagnés", value=str(xp_earned), inline=True)
+    embed.add_field(name="🔥 Streak", value=f"{streak} jours", inline=True)
+    if multiplier > 1.0:
+        embed.add_field(name="⚡ Bonus streak", value=f"x{multiplier}", inline=True)
+    embed.add_field(name="🪙 Solde total", value=str(data["coins"]), inline=True)
+    embed.set_footer(text="Reviens demain pour continuer ton streak !")
+    await message.channel.send(embed=embed)
+    await log_action(message.guild, "daily", None, message.author, extra={"Pièces": coins_earned, "Streak": streak})
+
+async def cmd_parrainer(message, args):
+    mentions = message.mentions
+    if not mentions:
+        await message.channel.send("❌ Usage : `!parrainer @pseudo`")
+        return
+
+    target = mentions[0]
+    if target.id == message.author.id:
+        await message.channel.send("❌ Tu ne peux pas te parrainer toi-même !")
+        return
+
+    db = load_db()
+    data_author = get_member_data(db, message.author.id)
+    data_target = get_member_data(db, target.id)
+
+    if data_target.get("godfather"):
+        await message.channel.send(f"❌ **{target.display_name}** a déjà un parrain.")
+        return
+
+    bonus = 100
+    data_author["coins"] += bonus
+    data_target["coins"] += bonus
+    data_target["godfather"] = str(message.author.id)
+    save_db(db)
+
+    embed = discord.Embed(
+        title="🤝 Parrainage réussi !",
+        description=f"**{message.author.display_name}** a parrainé **{target.display_name}** !\nVous recevez chacun **{bonus}** 🪙",
+        color=0x2ecc71
+    )
+    await message.channel.send(embed=embed)
 
 # ============================================================
 # CONFIRMATION
@@ -669,7 +1148,7 @@ async def handle_member_resolution(channel, action_data, author_id, exact, simil
             await send_confirmation(channel, action_data, author_id)
         elif action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
             await channel.send(embed=discord.Embed(
-                title="📝 Raison de la sanction",
+                title="🔍 Raison de la sanction",
                 description="Quelle est la raison de cette sanction ?",
                 color=0x3498db
             ))
@@ -749,6 +1228,38 @@ async def daily_report_loop():
             await send_daily_report(guild)
 
 # ============================================================
+# BOUTIQUE ROTATIVE LOOP
+# ============================================================
+async def shop_rotate_loop():
+    await client.wait_until_ready()
+    shop = load_shop()
+    if not shop["rotating"]:
+        rotate_shop()
+    while not client.is_closed():
+        shop = load_shop()
+        last = shop.get("last_rotate")
+        if last:
+            dt = datetime.fromisoformat(last)
+            next_rotate = dt + timedelta(seconds=SHOP_ROTATE_INTERVAL)
+            wait = (next_rotate - datetime.now(timezone.utc)).total_seconds()
+            if wait > 0:
+                await asyncio.sleep(wait)
+        else:
+            await asyncio.sleep(SHOP_ROTATE_INTERVAL)
+
+        new_items = rotate_shop()
+        for guild in client.guilds:
+            boutique_ch = get_channel_by_name(guild, "boutique")
+            if boutique_ch:
+                embed = discord.Embed(
+                    title="🔄 La boutique rotative s'est renouvelée !",
+                    description="\n".join([f"• **{i['name']}** — {i['price']} 🪙" for i in new_items]),
+                    color=0x2ecc71
+                )
+                embed.set_footer(text="!acheter [nom] pour acheter")
+                await boutique_ch.send(embed=embed)
+
+# ============================================================
 # RÔLE MEMBRE ACTIF
 # ============================================================
 async def update_active_roles_loop():
@@ -807,9 +1318,7 @@ async def send_help(channel):
             "`!inventaire` — voir tous tes rôles achetés\n"
             "`!classement` — top des membres les plus actifs\n\n"
             "**Social**\n"
-            "`!parrainer @pseudo` — parrainer un ami\n"
-            "`!abonner #salon` — s'abonner aux notifs d'un salon\n"
-            "`!désabonner #salon` — se désabonner\n\n"
+            "`!parrainer @pseudo` — parrainer un ami\n\n"
             "💡 Boutique → 🛍️・boutique\n"
             "🎁 Récompense quotidienne → 🎁・daily"
         )
@@ -821,7 +1330,7 @@ async def send_help(channel):
             "`!boutique` — voir la boutique standard et rotative\n"
             "`!acheter [nom]` — acheter un article\n"
             "`!équiper [nom]` — équiper un rôle cosmétique\n"
-            "`!spin` — tenter le gacha (50 pièces)\n\n"
+            "`!spin` — tenter le gacha (50 🪙)\n\n"
             "💡 La boutique rotative se renouvelle toutes les **3h**"
         )
 
@@ -857,7 +1366,8 @@ async def send_help(channel):
             "Les logs enregistrent automatiquement :\n\n"
             "🔨 Bans • 👢 Kicks • 🔇 Mutes • ⚠️ Warns\n"
             "🔊 Demutes • ✅ Débans • 📥 Arrivées • 📤 Départs\n"
-            "💬 Commentaires modos • 🤖 Mutes anti-spam"
+            "💬 Commentaires modos • 🤖 Mutes anti-spam\n"
+            "🛒 Achats • 🎰 Gacha • 🎁 Daily"
         )
 
     else:
@@ -881,22 +1391,20 @@ async def on_ready():
     print(f"✅ Bot connecté en tant que {client.user}")
     client.loop.create_task(daily_report_loop())
     client.loop.create_task(update_active_roles_loop())
+    client.loop.create_task(shop_rotate_loop())
 
 @client.event
 async def on_member_join(member):
     guild = member.guild
-
     role = discord.utils.get(guild.roles, name=ROLE_MEMBRE)
     if role:
         try:
             await member.add_roles(role)
         except:
             pass
-
     general = get_channel_by_name(guild, "chat-général")
     if general:
         await general.send(f"👋 Bienvenue sur le serveur, {member.mention} !")
-
     await log_action(guild, "join", None, member)
 
 @client.event
@@ -949,7 +1457,7 @@ async def on_reaction_add(reaction, user):
             if str(reaction.emoji) == "⚔️":
                 if action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
                     await reaction.message.channel.send(embed=discord.Embed(
-                        title="📝 Raison de la sanction",
+                        title="🔍 Raison de la sanction",
                         description="Quelle est la raison de cette sanction ?",
                         color=0x3498db
                     ))
@@ -965,7 +1473,6 @@ async def on_reaction_add(reaction, user):
             if not has_permission(user if isinstance(user, discord.Member) else reaction.message.guild.get_member(user.id)):
                 return
             waiting_for_action_choice.pop(msg_id)
-            mod_member = reaction.message.guild.get_member(user.id)
             if str(reaction.emoji) == "➕":
                 await reaction.message.channel.send(embed=discord.Embed(
                     title="💬 Ajouter un commentaire",
@@ -1039,6 +1546,8 @@ async def on_message(message):
         return
 
     channel_name = message.channel.name.lower().replace("・", "")
+    content = message.content.strip()
+    content_lower = content.lower()
 
     # --- Suivi activité membre ---
     mid = str(message.author.id)
@@ -1047,9 +1556,59 @@ async def on_message(message):
         member_message_days[mid] = {}
     member_message_days[mid][today] = member_message_days[mid].get(today, 0) + 1
 
+    # --- XP & pièces sur chaque message ---
+    is_boosted = update_boost(message.author.id)
+    coin_gain = COINS_BOOST if is_boosted else COINS_PER_MESSAGE
+    await add_xp_and_coins(message.author, message.guild, XP_PER_MESSAGE, coin_gain)
+
     # --- Commande !help / ?help ---
-    if message.content.strip().lower() in ["!help", "?help"]:
+    if content_lower in ["!help", "?help"]:
         await send_help(message.channel)
+        return
+
+    # --- Commandes salon jeux ---
+    if "jeux" in channel_name:
+        if content_lower == "!profil":
+            await cmd_profil(message)
+            return
+        if content_lower == "!inventaire":
+            await cmd_inventaire(message)
+            return
+        if content_lower == "!classement":
+            await cmd_classement(message)
+            return
+        if content_lower.startswith("!parrainer"):
+            await cmd_parrainer(message, content[10:].strip())
+            return
+        if content_lower in ["!boutique", "!spin"] or content_lower.startswith("!acheter") or content_lower.startswith("!équiper"):
+            boutique_ch = get_channel_by_name(message.guild, "boutique")
+            if boutique_ch:
+                await message.channel.send(f"❌ Cette commande est réservée à {boutique_ch.mention} !")
+            return
+        if content_lower == "!daily":
+            daily_ch = get_channel_by_name(message.guild, "daily")
+            if daily_ch:
+                await message.channel.send(f"❌ La commande `!daily` est réservée à {daily_ch.mention} !")
+            return
+
+    # --- Commandes salon boutique ---
+    if "boutique" in channel_name:
+        if content_lower == "!boutique":
+            await cmd_boutique(message)
+            return
+        if content_lower.startswith("!acheter "):
+            await cmd_acheter(message, content[9:].strip())
+            return
+        if content_lower.startswith("!équiper "):
+            await cmd_equiper(message, content[9:].strip())
+            return
+        if content_lower == "!spin":
+            await cmd_spin(message)
+            return
+
+    # --- Commande daily ---
+    if content_lower == "!daily":
+        await cmd_daily(message)
         return
 
     # --- Salon modération uniquement pour les commandes de mod ---
@@ -1090,7 +1649,7 @@ async def on_message(message):
         await send_confirmation(message.channel, action_data, message.author.id)
         return
 
-    # --- Anti-spam (pour tous les membres non-modo) ---
+    # --- Anti-spam ---
     if not has_permission(message.author):
         spammed = await check_spam(message)
         if spammed:
@@ -1099,19 +1658,33 @@ async def on_message(message):
     # --- Analyse IA de la commande ---
     async with message.channel.typing():
         try:
-            r = ai_client.chat.completions.create(
-                model="google/gemma-3-4b-it:free",
-                messages=[{"role": "user", "content": f"{SYSTEM_PROMPT}\n\nMessage du modérateur: {message.content}"}]
-            )
-            raw = r.choices[0].message.content.strip()
+            raw = ai_complete([{"role": "user", "content": f"{SYSTEM_PROMPT}\n\nMessage du modérateur: {message.content}"}])
+            if raw is None:
+                await message.channel.send(embed=discord.Embed(
+                    title="⚠️ Limite IA atteinte",
+                    description="Tous les modèles gratuits sont en limite quotidienne.\nRéessaie dans quelques heures ou utilise les commandes directes (`ban`, `mute`, etc.).",
+                    color=0xf39c12
+                ))
+                return
             if raw.startswith("```"):
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
                     raw = raw[4:]
             raw = raw.strip()
             action_data = json.loads(raw)
+        except json.JSONDecodeError:
+            await message.channel.send(embed=discord.Embed(
+                title="❌ Erreur d'analyse",
+                description="Je n'ai pas pu interpréter ta commande. Réessaie en étant plus précis.",
+                color=0xe74c3c
+            ))
+            return
         except Exception as e:
-            await message.channel.send(f"❌ Erreur lors de l'analyse : {e}")
+            await message.channel.send(embed=discord.Embed(
+                title="❌ Erreur",
+                description="Une erreur s'est produite lors de l'analyse. Réessaie dans un moment.",
+                color=0xe74c3c
+            ))
             return
 
     if action_data.get("action") == "none":

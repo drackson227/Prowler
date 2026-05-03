@@ -45,6 +45,18 @@ Si la cible n'est pas claire, mets needs_clarification à true et pose une quest
 Si aucune action de modération n'est détectée, mets action à "none".
 """
 
+REASON_PROMPT = """Tu es un assistant de modération Discord. 
+Reformule la raison donnée par un modérateur en une raison officielle, courte et professionnelle.
+Réponds UNIQUEMENT avec la raison reformulée, rien d'autre, pas de guillemets.
+
+Exemples :
+- "il est raciste" → "Comportement raciste"
+- "spam" → "Spam répété"
+- "il insulte tout le monde" → "Insultes envers les membres"
+- "il a envoyé des images inappropriées" → "Envoi de contenu inapproprié"
+- "trop chiant" → "Comportement perturbateur"
+"""
+
 ACTION_COLORS = {
     "ban": 0xe74c3c,
     "kick": 0xe67e22,
@@ -81,7 +93,6 @@ def find_similar_members(guild, description):
     description_lower = description.lower().strip()
     exact = []
     similar = []
-
     for member in guild.members:
         name_lower = member.display_name.lower()
         username_lower = member.name.lower()
@@ -90,10 +101,8 @@ def find_similar_members(guild, description):
             exact.append(member)
         elif score >= 0.5:
             similar.append((score, member))
-
     similar.sort(key=lambda x: x[0], reverse=True)
     similar_members = [m for _, m in similar if m not in exact]
-
     return exact, similar_members[:5]
 
 async def find_member(guild, description, channel):
@@ -103,14 +112,21 @@ async def find_member(guild, description, channel):
             return [guild.get_member(int(uid))], []
         except:
             return [], []
-
     exact, similar = find_similar_members(guild, description)
     return exact, similar
 
-async def execute_action(guild, action_data, mod_channel):
-    target_desc = action_data.get("target", "")
-    member = action_data.get("resolved_member")
+async def reformulate_reason(raw_reason):
+    try:
+        response = ai_client.chat.completions.create(
+            model="openrouter/free",
+            messages=[{"role": "user", "content": f"{REASON_PROMPT}\n\nRaison brute : {raw_reason}"}]
+        )
+        return response.choices[0].message.content.strip()
+    except:
+        return raw_reason
 
+async def execute_action(guild, action_data, mod_channel):
+    member = action_data.get("resolved_member")
     if not member:
         await mod_channel.send("❌ Aucun membre résolu pour cette action.")
         return
@@ -215,12 +231,10 @@ async def ask_member_choice(channel, action_data, author_id, candidates):
             inline=False
         )
     embed.set_footer(text="Réagis ❌ pour annuler")
-
     bot_msg = await channel.send(embed=embed)
     for i in range(len(candidates[:5])):
         await bot_msg.add_reaction(emojis[i])
     await bot_msg.add_reaction("❌")
-
     waiting_for_member_choice[bot_msg.id] = (action_data, author_id, candidates[:5])
 
 async def handle_member_resolution(channel, action_data, author_id, exact, similar):
@@ -276,7 +290,6 @@ async def on_reaction_add(reaction, user):
     if user.bot:
         return
 
-    # Choix de membre
     if reaction.message.id in waiting_for_member_choice:
         action_data, requester_id, candidates = waiting_for_member_choice[reaction.message.id]
         if user.id != requester_id:
@@ -299,7 +312,6 @@ async def on_reaction_add(reaction, user):
                     await send_confirmation(reaction.message.channel, action_data, requester_id)
         return
 
-    # Confirmation d'action
     if reaction.message.id in pending_actions:
         action_data, requester_id = pending_actions[reaction.message.id]
         if user.id != requester_id:
@@ -325,7 +337,9 @@ async def on_message(message):
 
     if message.author.id in waiting_for_reason:
         action_data = waiting_for_reason.pop(message.author.id)
-        action_data["reason"] = message.content
+        async with message.channel.typing():
+            refined_reason = await reformulate_reason(message.content)
+        action_data["reason"] = refined_reason
         await send_confirmation(message.channel, action_data, message.author.id)
         return
 

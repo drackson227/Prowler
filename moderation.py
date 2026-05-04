@@ -6,7 +6,7 @@ from openai import OpenAI
 
 from config import (
     OPENROUTER_API_KEY, FOUNDER_ROLES, ACTION_COLORS, ACTION_LABELS,
-    REASON_PROMPT, SYSTEM_PROMPT
+    REASON_PROMPT, SYSTEM_PROMPT, ALLOWED_ROLES
 )
 from db import load_db, save_db, get_member_data
 from utils import (
@@ -26,13 +26,63 @@ waiting_for_comment = {}
 mod_commands_log = []
 
 # ============================================================
-# DÉTECTION D'INTENTION (nouveau)
+# HIÉRARCHIE DES RÔLES
+# ============================================================
+# Plus l'index est bas, plus le rôle est puissant
+ROLE_HIERARCHY = ["Fondateur", "Modérateur"]
+
+def get_role_level(member):
+    """Retourne le niveau de puissance du membre (0 = plus puissant, 99 = simple membre)."""
+    for i, role_name in enumerate(ROLE_HIERARCHY):
+        if any(r.name == role_name for r in member.roles):
+            return i
+    return 99
+
+def can_sanction(moderator, target):
+    """
+    Vérifie si le modérateur peut sanctionner la cible.
+    Retourne (True, None) si autorisé, (False, raison) sinon.
+    """
+    # Le bot ne peut pas être sanctionné
+    if target.bot:
+        return False, "Tu ne peux pas sanctionner un bot."
+
+    mod_level = get_role_level(moderator)
+    target_level = get_role_level(target)
+
+    # Un modérateur ne peut pas sanctionner quelqu'un de niveau >= au sien
+    if target_level <= mod_level:
+        target_role = next((r.name for r in target.roles if r.name in ROLE_HIERARCHY), "Membre")
+        return False, f"Tu ne peux pas sanctionner **{target.display_name}** qui est **{target_role}**."
+
+    return True, None
+
+async def report_unauthorized_sanction(guild, moderator, target, action_attempted):
+    """Envoie un rapport dans rapport-prowler quand une sanction non autorisée est tentée."""
+    report_ch = get_channel_by_name(guild, "rapport-prowler")
+    if not report_ch:
+        return
+
+    target_role = next((r.name for r in target.roles if r.name in ROLE_HIERARCHY), "Membre")
+    mod_role = next((r.name for r in moderator.roles if r.name in ROLE_HIERARCHY), "Membre")
+
+    embed = discord.Embed(
+        title="🚨 Tentative de sanction non autorisée",
+        color=0xFF0000,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.add_field(name="👮 Modérateur", value=f"{moderator.mention} (`{moderator.name}`) — **{mod_role}**", inline=False)
+    embed.add_field(name="🎯 Cible visée", value=f"{target.mention} (`{target.name}`) — **{target_role}**", inline=False)
+    embed.add_field(name="⚔️ Action tentée", value=ACTION_LABELS.get(action_attempted, action_attempted), inline=True)
+    embed.add_field(name="📅 Date", value=datetime.now(timezone.utc).strftime("%d/%m/%Y à %H:%M UTC"), inline=True)
+    embed.set_footer(text="Rapport automatique — Prowler Bot")
+    await report_ch.send(embed=embed)
+
+
+# ============================================================
+# DÉTECTION D'INTENTION
 # ============================================================
 async def is_moderation_command(message_content: str) -> bool:
-    """
-    Vérifie via l'IA si le message est vraiment une commande de modération.
-    Retourne True si c'est une commande, False si c'est une conversation normale.
-    """
     try:
         response = ai_client.chat.completions.create(
             model="google/gemma-3-4b-it:free",
@@ -53,7 +103,6 @@ async def is_moderation_command(message_content: str) -> bool:
         answer = response.choices[0].message.content.strip().upper()
         return "OUI" in answer
     except Exception:
-        # En cas d'erreur IA, on laisse passer pour ne pas bloquer la modération
         return True
 
 
@@ -126,7 +175,11 @@ async def show_profile(channel, member, guild, show_mod_data=True):
             inline=False
         )
         if data.get("comments"):
-            embed.add_field(name="💬 Commentaires modos", value="\n".join([f"• {c}" for c in data["comments"]]), inline=False)
+            embed.add_field(
+                name="💬 Commentaires modos",
+                value="\n".join([f"• {c}" for c in data["comments"]]),
+                inline=False
+            )
     embed.set_footer(text=f"Analyse basée sur {data_msg['total']} messages publics")
     await msg.edit(embed=embed)
     if show_mod_data:
@@ -140,6 +193,7 @@ async def show_profile(channel, member, guild, show_mod_data=True):
         await action_msg.add_reaction("➖")
         waiting_for_action_choice[action_msg.id] = ("comment_mgmt", member, None, None)
 
+
 # ============================================================
 # EXECUTE ACTION
 # ============================================================
@@ -148,14 +202,30 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
     if not member:
         await mod_channel.send("❌ Aucun membre résolu.")
         return
+
     action = action_data.get("action")
+
     if action == "show_profile":
         await show_profile(mod_channel, member, guild)
         await log_action(guild, "show_profile", moderator, member)
         return
+
+    # ── Vérification hiérarchie ──
+    if moderator and action in ["ban", "kick", "mute", "warn", "delete_messages"]:
+        authorized, reason_denied = can_sanction(moderator, member)
+        if not authorized:
+            await mod_channel.send(embed=discord.Embed(
+                title="🚫 Action refusée",
+                description=reason_denied,
+                color=0xe74c3c
+            ))
+            await report_unauthorized_sanction(guild, moderator, member, action)
+            return
+
     reason = action_data.get("reason", "Aucune raison spécifiée")
     db = load_db()
     data = get_member_data(db, member.id)
+
     try:
         if action == "ban":
             await member.ban(reason=reason)
@@ -178,7 +248,9 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
             data["warns"] = min(data["warns"] + 1, 3)
             data["total_warns"] += 1
             try:
-                await member.send(f"⚠️ Tu as reçu un avertissement sur **{guild.name}** : {reason}")
+                await member.send(
+                    f"⚠️ Tu as reçu un avertissement sur **{guild.name}** : {reason}"
+                )
             except:
                 pass
         elif action == "delete_messages":
@@ -203,6 +275,7 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
                     pass
             action_data["deleted_count"] = deleted
             action_data["deleted_by_channel"] = deleted_by_channel
+
         if action not in ["unmute", "unban", "delete_messages", "show_profile"]:
             data["sanctions"].append({
                 "type": action,
@@ -211,9 +284,14 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
                 "duration": action_data.get("duration_minutes")
             })
         save_db(db)
+
         if moderator and action != "show_profile":
             tgt_name = member.display_name if hasattr(member, "display_name") else str(member)
-            mod_commands_log.append((datetime.now(timezone.utc).timestamp(), moderator.display_name, action, tgt_name))
+            mod_commands_log.append((
+                datetime.now(timezone.utc).timestamp(),
+                moderator.display_name, action, tgt_name
+            ))
+
         color = ACTION_COLORS.get(action, 0x2ecc71)
         label = ACTION_LABELS.get(action, action)
         duration = action_data.get("duration_minutes")
@@ -234,6 +312,7 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
             embed.add_field(name="📍 Salons", value=ch_detail, inline=True)
         embed.set_footer(text=f"ID : {member.id}")
         await mod_channel.send(embed=embed)
+
         if action != "show_profile":
             extra = {"Durée": f"{duration} min" if duration else None}
             if action == "delete_messages":
@@ -243,6 +322,7 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
                 extra["Messages supprimés"] = str(deleted_count)
                 extra["Salons"] = ch_detail
             await log_action(guild, action, moderator, member, reason=reason, extra=extra)
+
     except discord.Forbidden:
         await mod_channel.send(embed=discord.Embed(
             title="❌ Permission refusée",
@@ -251,6 +331,7 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
         ))
     except Exception as e:
         await mod_channel.send(f"❌ Erreur : {e}")
+
 
 # ============================================================
 # CONFIRMATION & CHOIX
@@ -376,6 +457,7 @@ async def handle_member_resolution(channel, action_data, author_id, exact, simil
         return
     await ask_member_choice(channel, action_data, author_id, all_candidates)
 
+
 # ============================================================
 # GIVE (Fondateur)
 # ============================================================
@@ -417,12 +499,16 @@ async def cmd_give(message, args):
         save_db(db)
         embed = discord.Embed(
             title="🪙 Pièces données !",
-            description=f"**{amount}** 🪙 ont été ajoutées au compte de {target.mention}\nNouveau solde : **{data['coins']}** 🪙",
+            description=(
+                f"**{amount}** 🪙 ont été ajoutées au compte de {target.mention}\n"
+                f"Nouveau solde : **{data['coins']}** 🪙"
+            ),
             color=0xf1c40f
         )
         embed.set_thumbnail(url=target.display_avatar.url)
         await message.channel.send(embed=embed)
-        await log_action(message.guild, "give_coins", message.author, target, extra={"Pièces": f"+{amount}", "Solde": data["coins"]})
+        await log_action(message.guild, "give_coins", message.author, target,
+                         extra={"Pièces": f"+{amount}", "Solde": data["coins"]})
     elif clean.lower().startswith("role:"):
         role_name = clean[5:].strip()
         role = discord.utils.get(message.guild.roles, name=role_name)
@@ -435,7 +521,11 @@ async def cmd_give(message, args):
             data = get_member_data(db, target.id)
             already = any(i.get("name", "") == role_name for i in data["inventory"])
             if not already:
-                data["inventory"].append({"id": role_name.lower().replace(" ", "_"), "name": role_name, "type": "role_color"})
+                data["inventory"].append({
+                    "id": role_name.lower().replace(" ", "_"),
+                    "name": role_name,
+                    "type": "role_color"
+                })
                 save_db(db)
             embed = discord.Embed(
                 title="🎁 Rôle donné !",
@@ -446,6 +536,8 @@ async def cmd_give(message, args):
             await message.channel.send(embed=embed)
             await log_action(message.guild, "give_role", message.author, target, extra={"Rôle": role_name})
         except discord.Forbidden:
-            await message.channel.send(f"❌ Je n'ai pas la permission d'attribuer le rôle **{role_name}**.")
+            await message.channel.send(
+                f"❌ Je n'ai pas la permission d'attribuer le rôle **{role_name}**."
+            )
     else:
         await message.channel.send("❌ Format invalide. Utilise `role:NomDuRole` ou `coins:X`")

@@ -198,7 +198,7 @@ async def cmd_inventaire(message):
         lines.append(f"{emoji} **{item['name']}**{equipped_tag}{expire_tag}")
 
     embed.description = "\n".join(lines)
-    embed.set_footer(text="Réagis avec le numéro pour équiper un rôle • ✅ = rôle actuellement équipé")
+    embed.set_footer(text="Réagis avec le numéro pour équiper/déséquiper • ✅ = rôle actuellement équipé")
 
     inv_msg = await message.channel.send(embed=embed)
 
@@ -224,22 +224,42 @@ async def cmd_inventaire(message):
         idx = NUMBER_EMOJIS.index(str(reaction.emoji))
         item = display_items[idx]
 
-        # Équipe le rôle
         db = load_db()
         data = get_member_data(db, message.author.id)
-        success, result = await equip_role_discord(message.guild, message.author, item, db, data)
-        save_db(db)
+        equipped = data.get("equipped", [])
 
-        if success:
+        # ✅ TOGGLE : si déjà équipé → déséquiper
+        if item["name"] in equipped:
+            role = discord.utils.get(message.guild.roles, name=item["name"])
+            if role and role in message.author.roles:
+                try:
+                    await message.author.remove_roles(role)
+                except:
+                    pass
+            data["equipped"] = []
+            save_db(db)
             confirm_embed = discord.Embed(
-                title="👗 Rôle équipé !",
-                description=f"Tu portes maintenant **{result}** !",
-                color=0x2ecc71
+                title="👗 Rôle retiré !",
+                description=f"Tu ne portes plus **{item['name']}**.",
+                color=0xe74c3c
             )
             await message.channel.send(embed=confirm_embed)
-            await log_action(message.guild, "shop_equip", None, message.author, extra={"Rôle équipé": result})
+            await log_action(message.guild, "shop_equip", None, message.author, extra={"Rôle retiré": item["name"]})
+
+        # Sinon → équiper normalement
         else:
-            await message.channel.send(f"❌ {result}")
+            success, result = await equip_role_discord(message.guild, message.author, item, db, data)
+            save_db(db)
+            if success:
+                confirm_embed = discord.Embed(
+                    title="👗 Rôle équipé !",
+                    description=f"Tu portes maintenant **{result}** !",
+                    color=0x2ecc71
+                )
+                await message.channel.send(embed=confirm_embed)
+                await log_action(message.guild, "shop_equip", None, message.author, extra={"Rôle équipé": result})
+            else:
+                await message.channel.send(f"❌ {result}")
 
     except Exception:
         # Timeout ou autre erreur — on supprime les réactions silencieusement

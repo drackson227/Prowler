@@ -1,5 +1,7 @@
 import discord
 import random
+import asyncio
+import re
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 from openai import OpenAI
@@ -97,7 +99,7 @@ async def analyze_member_messages(guild, member):
         msgs_text = "\n".join([f"- {m.content}" for m in messages[:50] if m.content])
         try:
             r = ai_client.chat.completions.create(
-                model="openrouter/free",
+                model="mistralai/mistral-7b-instruct:free",
                 messages=[{"role": "user", "content": f"{ANALYSIS_PROMPT}\n\nMessages :\n{msgs_text}"}]
             )
             ai_analysis = r.choices[0].message.content.strip()
@@ -109,11 +111,9 @@ async def analyze_member_messages(guild, member):
 # UTILITAIRE : équiper un rôle Discord
 # ============================================================
 async def equip_role_discord(guild, member, item, db, data):
-    """Attribue le rôle Discord correspondant à l'item et retire l'ancien rôle couleur."""
     color_hex = ROLE_COLORS_HEX.get(item["id"], 0x95a5a6)
     role_name = item["name"]
 
-    # Retire les anciens rôles couleur équipés
     old_equipped = data.get("equipped", [])
     for old_name in old_equipped:
         old_role = discord.utils.get(guild.roles, name=old_name)
@@ -123,7 +123,6 @@ async def equip_role_discord(guild, member, item, db, data):
             except:
                 pass
 
-    # Cherche ou crée le rôle Discord
     role = discord.utils.get(guild.roles, name=role_name)
     if not role:
         try:
@@ -135,7 +134,6 @@ async def equip_role_discord(guild, member, item, db, data):
         except Exception as e:
             return False, f"Impossible de créer le rôle : {e}"
 
-    # Attribue le rôle
     try:
         await member.add_roles(role)
     except Exception as e:
@@ -145,7 +143,7 @@ async def equip_role_discord(guild, member, item, db, data):
     return True, role_name
 
 # ============================================================
-# COMMANDES UTILISATEURS
+# !profil
 # ============================================================
 async def cmd_profil(message):
     db = load_db()
@@ -165,10 +163,8 @@ async def cmd_profil(message):
     await message.channel.send(embed=embed)
 
 # ============================================================
-# INVENTAIRE AVEC RÉACTIONS
+# !inventaire avec réactions
 # ============================================================
-
-# Emojis numérotés pour les réactions (max 10 items affichés)
 NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
 
 async def cmd_inventaire(message):
@@ -177,17 +173,13 @@ async def cmd_inventaire(message):
     inventory = data.get("inventory", [])
     equipped = data.get("equipped", [])
 
-    embed = discord.Embed(
-        title=f"🎒 Inventaire — {message.author.display_name}",
-        color=0x9b59b6
-    )
+    embed = discord.Embed(title=f"🎒 Inventaire — {message.author.display_name}", color=0x9b59b6)
 
     if not inventory:
         embed.description = "Tu n'as aucun article dans ton inventaire."
         await message.channel.send(embed=embed)
         return
 
-    # Limite à 10 items pour les réactions
     display_items = inventory[:10]
     lines = []
     for i, item in enumerate(display_items):
@@ -201,15 +193,12 @@ async def cmd_inventaire(message):
     embed.set_footer(text="Réagis avec le numéro pour équiper/déséquiper • ✅ = rôle actuellement équipé")
 
     inv_msg = await message.channel.send(embed=embed)
-
-    # Ajoute les réactions
     for i in range(len(display_items)):
         try:
             await inv_msg.add_reaction(NUMBER_EMOJIS[i])
         except:
             break
 
-    # Attend une réaction de l'auteur (30 secondes)
     def check(reaction, user):
         return (
             user.id == message.author.id
@@ -228,7 +217,6 @@ async def cmd_inventaire(message):
         data = get_member_data(db, message.author.id)
         equipped = data.get("equipped", [])
 
-        # ✅ TOGGLE : si déjà équipé → déséquiper
         if item["name"] in equipped:
             role = discord.utils.get(message.guild.roles, name=item["name"])
             if role and role in message.author.roles:
@@ -245,8 +233,6 @@ async def cmd_inventaire(message):
             )
             await message.channel.send(embed=confirm_embed)
             await log_action(message.guild, "shop_equip", None, message.author, extra={"Rôle retiré": item["name"]})
-
-        # Sinon → équiper normalement
         else:
             success, result = await equip_role_discord(message.guild, message.author, item, db, data)
             save_db(db)
@@ -262,12 +248,14 @@ async def cmd_inventaire(message):
                 await message.channel.send(f"❌ {result}")
 
     except Exception:
-        # Timeout ou autre erreur — on supprime les réactions silencieusement
         try:
             await inv_msg.clear_reactions()
         except:
             pass
 
+# ============================================================
+# !boutique
+# ============================================================
 async def cmd_boutique(message):
     shop = load_shop()
     embed = discord.Embed(title="🛍️ Boutique", color=0x2ecc71)
@@ -292,23 +280,25 @@ async def cmd_boutique(message):
         rarity_weight = {"légendaire": 2, "épique": 8, "rare": 20, "commun": 70}
         total_w = sum(rarity_weight.get(i.get("rarity", "commun"), 70) for i in gacha_items)
         rarity_labels = {"légendaire": "🌟 Légendaire", "épique": "💜 Épique", "rare": "💙 Rare", "commun": "⬜ Commun"}
-        gacha_embed = discord.Embed(title="🎰 Gacha — Rôles disponibles", description=f"Prix : **{GACHA_COST}** 🪙 par spin\nUtilise `!spin` pour tenter ta chance !", color=0xf1c40f)
+        gacha_embed = discord.Embed(
+            title="🎰 Gacha — Rôles disponibles",
+            description=f"Prix : **{GACHA_COST}** 🪙 par spin\nUtilise `!spin` pour tenter ta chance !",
+            color=0xf1c40f
+        )
         for item in gacha_items:
             rarity = item.get("rarity", "commun")
             w = rarity_weight.get(rarity, 70)
             pct = round((w / total_w) * 100, 2) if total_w > 0 else 0
-            color_hex = ROLE_COLORS_HEX.get(item["id"], 0x95a5a6)
-            r = (color_hex >> 16) & 0xFF
-            g = (color_hex >> 8) & 0xFF
-            b = color_hex & 0xFF
-            color_square = "🟥" if r > 200 and g < 100 else "🟦" if b > 200 and r < 100 else "🟩" if g > 200 and r < 100 else "🟨" if r > 200 and g > 200 else "🟪" if b > 150 and r > 100 else "⬜"
             gacha_embed.add_field(
-                name=f"{color_square} {item['name']}",
+                name=item["name"],
                 value=f"{rarity_labels.get(rarity, rarity)}\n**{pct}%** de chance",
                 inline=True
             )
         await message.channel.send(embed=gacha_embed)
 
+# ============================================================
+# !acheter
+# ============================================================
 async def cmd_acheter(message, item_name):
     if not item_name:
         await message.channel.send("❌ Usage : `!acheter [nom de l'article]`")
@@ -344,8 +334,10 @@ async def cmd_acheter(message, item_name):
     await message.channel.send(embed=embed)
     await log_action(message.guild, "shop_buy", None, message.author, extra={"Article": item["name"], "Prix": f"{item['price']} 🪙"})
 
+# ============================================================
+# !équiper
+# ============================================================
 async def cmd_equiper(message, item_name):
-    """Équipe un rôle depuis la commande texte !équiper"""
     if not item_name:
         await message.channel.send("❌ Usage : `!équiper [nom du rôle]`")
         return
@@ -354,23 +346,12 @@ async def cmd_equiper(message, item_name):
     data = get_member_data(db, message.author.id)
     inventory = data.get("inventory", [])
 
-    # Recherche flexible : ignore la casse ET les emojis en début de nom
     def normalize(s):
-        # Retire les emojis Unicode courants en début de chaîne
-        import re
         return re.sub(r'^[\U00010000-\U0010ffff\u2600-\u26FF\u2700-\u27BF\U0001F300-\U0001F9FF\s]+', '', s).strip().lower()
 
-    item = next(
-        (i for i in inventory if normalize(i["name"]) == normalize(item_name)),
-        None
-    )
-
-    # Fallback : recherche partielle si aucun match exact
+    item = next((i for i in inventory if normalize(i["name"]) == normalize(item_name)), None)
     if not item:
-        item = next(
-            (i for i in inventory if normalize(item_name) in normalize(i["name"])),
-            None
-        )
+        item = next((i for i in inventory if normalize(item_name) in normalize(i["name"])), None)
 
     if not item:
         await message.channel.send(f"❌ Tu ne possèdes pas **{item_name}**. Achète-le d'abord !")
@@ -390,12 +371,19 @@ async def cmd_equiper(message, item_name):
     else:
         await message.channel.send(f"❌ {result}")
 
+# ============================================================
+# !spin  (BUG CORRIGÉ : plus de double load_db après animation)
+# ============================================================
 async def cmd_spin(message):
     db = load_db()
     data = get_member_data(db, message.author.id)
+
     if data["coins"] < GACHA_COST:
-        await message.channel.send(f"❌ Tu n'as pas assez de pièces. (Tu as **{data['coins']}** 🪙, il faut **{GACHA_COST}** 🪙)")
+        await message.channel.send(
+            f"❌ Tu n'as pas assez de pièces. (Tu as **{data['coins']}** 🪙, il faut **{GACHA_COST}** 🪙)"
+        )
         return
+
     shop = load_shop()
     gacha_pool = shop["gacha"]
     if not gacha_pool:
@@ -408,39 +396,40 @@ async def cmd_spin(message):
         weights.append({"légendaire": 2, "épique": 8, "rare": 20}.get(r, 70))
     won_item = random.choices(gacha_pool, weights=weights, k=1)[0]
 
+    # Débite les pièces MAINTENANT dans l'objet data (pas encore sauvegardé)
     data["coins"] -= GACHA_COST
-    save_db(db)
 
-    # ── Animation suspense ──────────────────────────────────────
+    # ── Animation ──────────────────────────────────────────────
     suspense_frames = [
         ("🎰 Spin en cours...", "❓ ❓ ❓"),
         ("🎰 Ça tourne...", "⬛ ❓ ❓"),
         ("🎰 Presque...", "⬛ ⬛ ❓"),
         ("🎰 C'est...", "⬛ ⬛ 🎁"),
     ]
-
-    import asyncio
-    embed_anim = discord.Embed(title="🎰 Spin en cours...", description="❓ ❓ ❓", color=0xf1c40f)
+    embed_anim = discord.Embed(title=suspense_frames[0][0], description=suspense_frames[0][1], color=0xf1c40f)
     spin_msg = await message.channel.send(embed=embed_anim)
 
     for title, desc in suspense_frames[1:]:
         await asyncio.sleep(0.9)
-        embed_anim = discord.Embed(title=title, description=desc, color=0xf1c40f)
-        await spin_msg.edit(embed=embed_anim)
+        await spin_msg.edit(embed=discord.Embed(title=title, description=desc, color=0xf1c40f))
 
     await asyncio.sleep(0.9)
-    # ── Résultat final ──────────────────────────────────────────
 
-    db = load_db()
-    data = get_member_data(db, message.author.id)
+    # ── Résultat (on utilise toujours le même db/data, PAS de reload) ──
     already = any(i["id"] == won_item["id"] for i in data["inventory"])
     if not already:
-        data["inventory"].append({"id": won_item["id"], "name": won_item["name"], "type": won_item["type"]})
-        result_txt = f"Tu as obtenu **{won_item['name']}** !"
+        data["inventory"].append({
+            "id": won_item["id"],
+            "name": won_item["name"],
+            "type": won_item["type"]
+        })
+        result_txt = f"🎉 Tu as obtenu **{won_item['name']}** !"
     else:
         refund = 10
         data["coins"] += refund
         result_txt = f"Tu as obtenu **{won_item['name']}** (déjà possédé → **+{refund}** 🪙 remboursés)"
+
+    # Sauvegarde UNE SEULE FOIS à la fin
     save_db(db)
 
     rarity = won_item.get("rarity", "commun")
@@ -455,12 +444,18 @@ async def cmd_spin(message):
     embed_result.add_field(name="🎁 Récompense", value=result_txt, inline=False)
     embed_result.add_field(name="✨ Rareté", value=rarity_labels.get(rarity, rarity), inline=True)
     embed_result.add_field(name="🎯 Probabilité", value=f"**{chance_pct}%** de chance", inline=True)
-    embed_result.add_field(name="🪙 Solde", value=str(data["coins"]), inline=True)
-    embed_result.set_footer(text=f"Coût : {GACHA_COST} 🪙 • Légendaire : {round(2/total_weight*100,2)}% • Épique : {round(8/total_weight*100,2)}% • Rare : {round(20/total_weight*100,2)}% • Commun : {round(70/total_weight*100,2)}%")
-
+    embed_result.add_field(name="🪙 Solde restant", value=f"**{data['coins']}** 🪙", inline=True)
+    embed_result.set_footer(
+        text=f"Coût : {GACHA_COST} 🪙 • Légendaire : {round(2/total_weight*100,2)}% • "
+             f"Épique : {round(8/total_weight*100,2)}% • Rare : {round(20/total_weight*100,2)}% • "
+             f"Commun : {round(70/total_weight*100,2)}%"
+    )
     await spin_msg.edit(embed=embed_result)
     await log_action(message.guild, "gacha", None, message.author, extra={"Obtenu": won_item["name"], "Rareté": rarity})
 
+# ============================================================
+# !classement
+# ============================================================
 async def cmd_classement(message):
     db = load_db()
     members_data = []
@@ -473,10 +468,16 @@ async def cmd_classement(message):
     top = members_data[:10]
     embed = discord.Embed(title="🏆 Classement — Top 10", color=0xf1c40f)
     medals = ["🥇", "🥈", "🥉"] + ["4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    lines = [f"{medals[i]} **{name}** — Niv. {level} • {xp} XP • {coins} 🪙" for i, (name, level, xp, coins) in enumerate(top)]
+    lines = [
+        f"{medals[i]} **{name}** — Niv. {level} • {xp} XP • {coins} 🪙"
+        for i, (name, level, xp, coins) in enumerate(top)
+    ]
     embed.description = "\n".join(lines) if lines else "Aucun membre classé."
     await message.channel.send(embed=embed)
 
+# ============================================================
+# !daily
+# ============================================================
 async def cmd_daily(message):
     channel_name = message.channel.name.lower().replace("・", "")
     if "daily" not in channel_name:
@@ -517,6 +518,9 @@ async def cmd_daily(message):
     await message.channel.send(embed=embed)
     await log_action(message.guild, "daily", None, message.author, extra={"Pièces": coins_earned, "Streak": streak})
 
+# ============================================================
+# !parrainer
+# ============================================================
 async def cmd_parrainer(message, args):
     mentions = message.mentions
     if not mentions:

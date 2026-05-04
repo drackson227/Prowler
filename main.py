@@ -1,4 +1,5 @@
 import discord
+from discord.ext import commands
 import os
 import json
 import asyncio
@@ -18,16 +19,16 @@ MOD_CHANNEL = "modération"
 LOG_CHANNEL = "📋・logs"
 GENERAL_CHANNEL = "💬・chat-général"
 REPORT_CHANNEL = "📝・rapport-prowler"
-REPORT_HOUR = 22  # heure du rapport quotidien (UTC+0, ajuste si besoin)
+REPORT_HOUR = 22
 
 ROLE_MEMBRE = "Membre"
 ROLE_MEMBRE_ACTIF = "Membre Actif"
-ACTIVE_MESSAGES_PER_DAY = 10       # messages/jour minimum pour être actif
-ACTIVE_DAYS_REQUIRED = 2           # jours consécutifs
-INACTIVE_DAYS_REQUIRED = 2         # jours sans messages pour perdre le rôle
+ACTIVE_MESSAGES_PER_DAY = 10
+ACTIVE_DAYS_REQUIRED = 2
+INACTIVE_DAYS_REQUIRED = 2
 
-SPAM_THRESHOLD = 10                # nb de messages identiques
-SPAM_WINDOW = 30                   # secondes
+SPAM_THRESHOLD = 10
+SPAM_WINDOW = 30
 # ============================================================
 
 ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
@@ -37,7 +38,8 @@ intents.message_content = True
 intents.members = True
 intents.reactions = True
 
-client = discord.Client(intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+client = bot  # alias de compatibilité
 
 # ---------- états en mémoire ----------
 pending_actions = {}          # msg_id → (action_data, author_id)
@@ -746,24 +748,24 @@ async def send_daily_report(guild):
     await report_ch.send(embed=embed)
 
 async def daily_report_loop():
-    await client.wait_until_ready()
-    while not client.is_closed():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
         now = datetime.now(timezone.utc)
         next_run = now.replace(hour=REPORT_HOUR, minute=0, second=0, microsecond=0)
         if now >= next_run:
             next_run += timedelta(days=1)
         await asyncio.sleep((next_run - now).total_seconds())
-        for guild in client.guilds:
+        for guild in bot.guilds:
             await send_daily_report(guild)
 
 # ============================================================
 # RÔLE MEMBRE ACTIF
 # ============================================================
 async def update_active_roles_loop():
-    await client.wait_until_ready()
-    while not client.is_closed():
-        await asyncio.sleep(3600)  # toutes les heures
-        for guild in client.guilds:
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        await asyncio.sleep(3600)
+        for guild in bot.guilds:
             role_actif = discord.utils.get(guild.roles, name=ROLE_MEMBRE_ACTIF)
             role_membre = discord.utils.get(guild.roles, name=ROLE_MEMBRE)
             if not role_actif or not role_membre:
@@ -934,13 +936,19 @@ async def send_help(channel):
 # ============================================================
 # ÉVÉNEMENTS
 # ============================================================
-@client.event
+@bot.event
 async def on_ready():
-    print(f"✅ Bot connecté en tant que {client.user}")
-    client.loop.create_task(daily_report_loop())
-    client.loop.create_task(update_active_roles_loop())
+    print(f"✅ Bot connecté en tant que {bot.user}")
+    for cog in ["voc"]:
+        try:
+            await bot.load_extension(cog)
+            print(f"✅ Cog '{cog}' chargé")
+        except Exception as e:
+            print(f"❌ Erreur chargement cog '{cog}' : {e}")
+    bot.loop.create_task(daily_report_loop())
+    bot.loop.create_task(update_active_roles_loop())
 
-@client.event
+@bot.event
 async def on_member_join(member):
     guild = member.guild
 
@@ -960,11 +968,11 @@ async def on_member_join(member):
     # Log
     await log_action(guild, "join", None, member)
 
-@client.event
+@bot.event
 async def on_member_remove(member):
     await log_action(member.guild, "leave", None, member)
 
-@client.event
+@bot.event
 async def on_reaction_add(reaction, user):
     if user.bot:
         return
@@ -1099,10 +1107,13 @@ async def on_reaction_add(reaction, user):
             pending_actions.pop(msg_id)
             await reaction.message.channel.send(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))
 
-@client.event
+@bot.event
 async def on_message(message):
     if message.author.bot:
         return
+
+    # Nécessaire pour que les commandes des cogs (voc, etc.) fonctionnent
+    await bot.process_commands(message)
 
     channel_name = message.channel.name.lower().replace("・", "")
 
@@ -1192,4 +1203,4 @@ async def on_message(message):
     exact, similar, is_id, is_banned = await find_member(message.guild, action_data.get("target", ""), message.channel)
     await handle_member_resolution(message.channel, action_data, message.author.id, exact, similar, is_id, is_banned)
 
-client.run(DISCORD_TOKEN)
+bot.run(DISCORD_TOKEN)

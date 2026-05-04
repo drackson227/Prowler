@@ -25,7 +25,7 @@ from economy import (
 from shop import rotate_shop, load_shop
 from moderation import (
     show_profile, execute_action, send_confirmation, ask_action_choice,
-    handle_member_resolution, cmd_give,
+    handle_member_resolution, cmd_give, is_moderation_command,
     pending_actions, waiting_for_reason, waiting_for_member_choice,
     waiting_for_action_choice, waiting_for_comment, mod_commands_log
 )
@@ -501,6 +501,18 @@ async def on_message(message):
         spammed = await check_spam(message)
         if spammed:
             return
+
+    # ── DÉTECTION D'INTENTION ──────────────────────────────────
+    # Si le modo n'attend pas de réponse en cours (raison, commentaire),
+    # on vérifie que le message est bien une commande avant de le traiter.
+    already_waiting = (
+        message.author.id in waiting_for_reason or
+        message.author.id in waiting_for_comment
+    )
+    if not already_waiting:
+        if not await is_moderation_command(content):
+            return  # "probablement noir" → ignoré silencieusement ✅
+    # ──────────────────────────────────────────────────────────────
 
     action_data = None
     try:

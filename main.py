@@ -533,22 +533,28 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
         elif action == "delete_messages":
             count = action_data.get("count") or 10
             deleted = 0
-            public_channels = [ch for ch in guild.text_channels if ch.permissions_for(guild.default_role).read_messages]
+            deleted_by_channel = {}
+            # Chercher dans tous les salons texte (pas seulement publics)
+            all_text_channels = guild.text_channels
             all_msgs = []
-            for ch in public_channels:
+            for ch in all_text_channels:
                 try:
-                    async for msg in ch.history(limit=500):
+                    async for msg in ch.history(limit=2000):
                         if msg.author.id == member.id:
-                            all_msgs.append(msg)
+                            all_msgs.append((msg, ch.name))
                 except:
                     continue
-            all_msgs.sort(key=lambda m: m.created_at, reverse=True)
-            for msg in all_msgs[:count]:
+            # Trier par date décroissante → les X plus récents
+            all_msgs.sort(key=lambda x: x[0].created_at, reverse=True)
+            for msg, ch_name in all_msgs[:count]:
                 try:
                     await msg.delete()
                     deleted += 1
+                    deleted_by_channel[ch_name] = deleted_by_channel.get(ch_name, 0) + 1
                 except:
                     pass
+            action_data["deleted_count"] = deleted
+            action_data["deleted_by_channel"] = deleted_by_channel
         if action not in ["unmute", "unban", "delete_messages", "show_profile"]:
             data["sanctions"].append({
                 "type": action,
@@ -573,11 +579,23 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
             embed.add_field(name="Raison", value=reason, inline=False)
         if action == "warn":
             embed.add_field(name="Avertissements", value=f"{data['warns']}/3", inline=True)
+        if action == "delete_messages":
+            deleted_count = action_data.get("deleted_count", 0)
+            by_ch = action_data.get("deleted_by_channel", {})
+            ch_detail = ", ".join([f"#{ch} ({n})" for ch, n in by_ch.items()]) if by_ch else "—"
+            embed.add_field(name="🗑️ Messages supprimés", value=str(deleted_count), inline=True)
+            embed.add_field(name="📍 Salons", value=ch_detail, inline=True)
         embed.set_footer(text=f"ID : {member.id}")
         await mod_channel.send(embed=embed)
         if action != "show_profile":
-            await log_action(guild, action, moderator, member, reason=reason,
-                             extra={"Durée": f"{duration} min" if duration else None})
+            extra = {"Durée": f"{duration} min" if duration else None}
+            if action == "delete_messages":
+                deleted_count = action_data.get("deleted_count", 0)
+                by_ch = action_data.get("deleted_by_channel", {})
+                ch_detail = ", ".join([f"#{ch} ({n})" for ch, n in by_ch.items()]) if by_ch else "—"
+                extra["Messages supprimés"] = str(deleted_count)
+                extra["Salons"] = ch_detail
+            await log_action(guild, action, moderator, member, reason=reason, extra=extra)
     except discord.Forbidden:
         await mod_channel.send(embed=discord.Embed(
             title="❌ Permission refusée",
@@ -779,19 +797,22 @@ async def cmd_boutique(message):
     # Gacha : un embed coloré par rôle
     gacha_items = shop.get("gacha", [])
     if gacha_items:
+        rarity_weight = {"légendaire": 2, "épique": 8, "rare": 20, "commun": 70}
+        total_w = sum(rarity_weight.get(i.get("rarity", "commun"), 70) for i in gacha_items)
         rarity_labels = {"légendaire": "🌟 Légendaire", "épique": "💜 Épique", "rare": "💙 Rare", "commun": "⬜ Commun"}
-        rarity_chances = {"légendaire": "2%", "épique": "8%", "rare": "20%", "commun": "70%"}
         gacha_embed = discord.Embed(title="🎰 Gacha — Rôles disponibles", description=f"Prix : **{GACHA_COST}** 🪙 par spin\nUtilise `!spin` pour tenter ta chance !", color=0xf1c40f)
         for item in gacha_items:
             rarity = item.get("rarity", "commun")
+            w = rarity_weight.get(rarity, 70)
+            pct = round((w / total_w) * 100, 2) if total_w > 0 else 0
             color_hex = ROLE_COLORS_HEX.get(item["id"], 0x95a5a6)
             r = (color_hex >> 16) & 0xFF
             g = (color_hex >> 8) & 0xFF
             b = color_hex & 0xFF
-            color_square = f"🟥" if r > 200 and g < 100 else "🟦" if b > 200 and r < 100 else "🟩" if g > 200 and r < 100 else "🟨" if r > 200 and g > 200 else "🟪" if b > 150 and r > 100 else "⬜"
+            color_square = "🟥" if r > 200 and g < 100 else "🟦" if b > 200 and r < 100 else "🟩" if g > 200 and r < 100 else "🟨" if r > 200 and g > 200 else "🟪" if b > 150 and r > 100 else "⬜"
             gacha_embed.add_field(
                 name=f"{color_square} {item['name']}",
-                value=f"{rarity_labels.get(rarity, rarity)} • {rarity_chances.get(rarity, '?')}",
+                value=f"{rarity_labels.get(rarity, rarity)}\n**{pct}%** de chance",
                 inline=True
             )
         await message.channel.send(embed=gacha_embed)
@@ -883,11 +904,18 @@ async def cmd_spin(message):
     save_db(db)
     rarity = won_item.get("rarity", "commun")
     color = RARITY_COLORS.get(rarity, 0x95a5a6)
+    # Calculer le % réel basé sur les poids du pool
+    rarity_weight = {"légendaire": 2, "épique": 8, "rare": 20, "commun": 70}
+    total_weight = sum(rarity_weight.get(i.get("rarity", "commun"), 70) for i in gacha_pool)
+    item_weight = rarity_weight.get(rarity, 70)
+    chance_pct = round((item_weight / total_weight) * 100, 2) if total_weight > 0 else 0
+    rarity_labels = {"légendaire": "🌟 Légendaire", "épique": "💜 Épique", "rare": "💙 Rare", "commun": "⬜ Commun"}
     embed = discord.Embed(title="🎰 Résultat du Gacha !", color=color)
     embed.add_field(name="🎁 Récompense", value=result_txt, inline=False)
-    embed.add_field(name="✨ Rareté", value=rarity.capitalize(), inline=True)
+    embed.add_field(name="✨ Rareté", value=f"{rarity_labels.get(rarity, rarity)}", inline=True)
+    embed.add_field(name="🎯 Probabilité", value=f"**{chance_pct}%** de chance", inline=True)
     embed.add_field(name="🪙 Solde", value=str(data["coins"]), inline=True)
-    embed.set_footer(text=f"Coût : {GACHA_COST} 🪙")
+    embed.set_footer(text=f"Coût : {GACHA_COST} 🪙 • Légendaire : {round(2/total_weight*100,2)}% • Épique : {round(8/total_weight*100,2)}% • Rare : {round(20/total_weight*100,2)}% • Commun : {round(70/total_weight*100,2)}%")
     await message.channel.send(embed=embed)
     await log_action(message.guild, "gacha", None, message.author, extra={"Obtenu": won_item["name"], "Rareté": rarity})
 
@@ -1654,9 +1682,6 @@ async def on_message(message):
     # --- Commande daily ---
     if content_lower == "!daily":
         await cmd_daily(message)
-        return
-    if content_lower in ["!info", "?info"] and "daily" in channel_name:
-        await send_help(message.channel)
         return
 
     # --- Salon modération uniquement pour les commandes de mod ---

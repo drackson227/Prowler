@@ -3,7 +3,6 @@ import os
 import json
 import asyncio
 import random
-import unicodedata
 from datetime import timedelta, datetime, timezone
 from openai import OpenAI
 from collections import defaultdict
@@ -31,6 +30,7 @@ INACTIVE_DAYS_REQUIRED = 2
 SPAM_THRESHOLD = 10
 SPAM_WINDOW = 30
 
+# XP & pièces
 XP_PER_MESSAGE = 10
 COINS_PER_MESSAGE = 1
 COINS_BOOST = 2
@@ -38,9 +38,13 @@ BOOST_INTERVAL = 300
 BOOST_DURATION = 1800
 BOOST_INACTIVE = 360
 
-SHOP_ROTATE_INTERVAL = 10800
+# Boutique rotative
+SHOP_ROTATE_INTERVAL = 10800  # 3h
+
+# Gacha
 GACHA_COST = 50
 
+# Daily streak multipliers
 STREAK_MULTIPLIERS = {3: 1.5, 7: 2.0, 14: 2.5, 30: 3.0}
 DAILY_BASE_COINS = 50
 # ============================================================
@@ -54,6 +58,7 @@ intents.reactions = True
 
 client = discord.Client(intents=intents)
 
+# ---------- états en mémoire ----------
 pending_actions = {}
 waiting_for_reason = {}
 waiting_for_member_choice = {}
@@ -62,8 +67,9 @@ waiting_for_comment = {}
 spam_tracker = {}
 member_message_days = {}
 boost_tracker = {}
-mod_commands_log = []
+mod_commands_log = []  # [(timestamp, mod_name, action, target_name)]
 
+# ---------- DB JSON simple ----------
 DB_FILE = "db.json"
 
 def load_db():
@@ -80,10 +86,23 @@ def get_member_data(db, member_id):
     mid = str(member_id)
     if mid not in db:
         db[mid] = {
-            "warns": 0, "total_warns": 0, "mutes": 0, "kicks": 0, "bans": 0,
-            "spam_mute_count": 0, "comments": [], "sanctions": [],
-            "xp": 0, "level": 0, "coins": 0, "inventory": [], "equipped": [],
-            "daily_streak": 0, "last_daily": None, "godfather": None, "subscriptions": []
+            "warns": 0,
+            "total_warns": 0,
+            "mutes": 0,
+            "kicks": 0,
+            "bans": 0,
+            "spam_mute_count": 0,
+            "comments": [],
+            "sanctions": [],
+            "xp": 0,
+            "level": 0,
+            "coins": 0,
+            "inventory": [],
+            "equipped": [],
+            "daily_streak": 0,
+            "last_daily": None,
+            "godfather": None,
+            "subscriptions": []
         }
     for key, default in [
         ("xp", 0), ("level", 0), ("coins", 0), ("inventory", []),
@@ -127,15 +146,6 @@ ROTATING_POOL = [
     {"id": "role_turquoise", "name": "Rôle Turquoise", "type": "role_color", "price": 130, "duration": None},
     {"id": "role_corail", "name": "Rôle Corail", "type": "role_color", "price": 130, "duration": None},
 ]
-
-ROLE_COLORS_HEX = {
-    "role_bleu": 0x3498db, "role_rouge": 0xe74c3c, "role_vert": 0x2ecc71,
-    "role_violet": 0x9b59b6, "role_orange": 0xe67e22, "role_cyan": 0x1abc9c,
-    "role_jaune": 0xf1c40f, "role_magenta": 0xe91e8c, "role_blanc": 0xffffff,
-    "role_turquoise": 0x40e0d0, "role_corail": 0xff6b6b, "role_rose": 0xff69b4,
-    "role_noir": 0x2c2f33, "role_gold": 0xffd700, "role_arc_en_ciel": 0x9b59b6,
-    "role_bleu_temp": 0x3498db, "role_rouge_temp": 0xe74c3c,
-}
 
 def load_shop():
     if os.path.exists(SHOP_FILE):
@@ -189,10 +199,13 @@ async def add_xp_and_coins(member, guild, xp_gain, coin_gain):
                 color=0xf1c40f
             )
             embed.add_field(name="📈 Nouveau niveau", value=f"**{new_level}**", inline=True)
+            embed.add_field(name="✨ XP gagné", value=f"+{xp_gain} XP", inline=True)
+            embed.add_field(name="🪙 Pièces gagnées", value=f"+{coin_gain} 🪙", inline=True)
             embed.add_field(name="✨ XP total", value=str(data["xp"]), inline=True)
-            embed.add_field(name="🪙 Pièces", value=str(data["coins"]), inline=True)
+            embed.add_field(name="🪙 Solde total", value=str(data["coins"]), inline=True)
             next_lvl_xp = xp_for_level(new_level)
             embed.add_field(name="📊 Prochain niveau", value=f"{next_lvl_xp} XP requis", inline=True)
+            embed.set_footer(text="Continue comme ça ! 💪")
             await member.send(embed=embed)
         except:
             pass
@@ -216,12 +229,70 @@ def update_boost(member_id):
     return tracker.get("active", False)
 
 # ============================================================
+# PROMPTS IA
+# ============================================================
+SYSTEM_PROMPT = """Tu es un assistant de modération Discord.
+À partir d'un message en langage naturel, tu dois extraire l'action de modération voulue et retourner un JSON.
+
+Actions possibles: ban, kick, mute, warn, delete_messages, unmute, unban, show_profile, none
+
+show_profile : quand le modérateur veut voir le profil, les infos, ou revoir un membre (ex: "montre le profil de X", "remontre son profil", "infos sur X", "qui est X", "vérifie X").
+
+Format de réponse JSON uniquement (pas de texte autour) :
+{
+  "action": "ban|kick|mute|warn|delete_messages|unmute|unban|show_profile|none",
+  "target": "mention ou description de l'utilisateur ciblé",
+  "duration_minutes": null ou nombre (pour mute),
+  "count": null ou nombre (pour delete_messages),
+  "reason": null,
+  "needs_clarification": false,
+  "clarification_question": null
+}
+
+Si la cible n'est pas claire, mets needs_clarification à true.
+Si aucune action de modération n'est détectée, mets action à "none".
+"""
+
+REASON_PROMPT = """Tu es un assistant de modération Discord.
+Reformule la raison donnée par un modérateur en une raison officielle, courte et professionnelle.
+Réponds UNIQUEMENT avec la raison reformulée, rien d'autre, pas de guillemets.
+
+Exemples :
+- "il est raciste" → "Comportement raciste"
+- "spam" → "Spam répété"
+- "il insulte tout le monde" → "Insultes envers les membres"
+- "trop chiant" → "Comportement perturbateur"
+"""
+
+ANALYSIS_PROMPT = """Analyse le comportement de cet utilisateur Discord basé sur ses derniers messages.
+Donne une appréciation courte (3-5 lignes max) mentionnant :
+- Son ton général (poli, agressif, neutre...)
+- S'il insulte souvent ou non
+- Son niveau d'activité dans les discussions
+- Une appréciation globale
+
+Réponds en français, de façon concise et professionnelle."""
+
+# ============================================================
+# COULEURS & LABELS
+# ============================================================
+ACTION_COLORS = {
+    "ban": 0xe74c3c, "kick": 0xe67e22, "mute": 0xf39c12,
+    "unmute": 0x2ecc71, "unban": 0x2ecc71, "warn": 0xf1c40f,
+    "delete_messages": 0x9b59b6,
+}
+ACTION_LABELS = {
+    "ban": "🔨 Bannissement", "kick": "👢 Kick", "mute": "🔇 Mute",
+    "unmute": "🔊 Demute", "unban": "✅ Déban", "warn": "⚠️ Avertissement",
+    "delete_messages": "🗑️ Suppression de messages",
+}
+RARITY_COLORS = {
+    "légendaire": 0xf1c40f, "épique": 0x9b59b6, "rare": 0x3498db, "commun": 0x95a5a6
+}
+
+# ============================================================
 # UTILITAIRES
 # ============================================================
-def normalize_name(s):
-    s = s.lower().replace("・", "")
-    return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("ascii")
-
 def has_permission(member):
     if member.guild.owner_id == member.id:
         return True
@@ -241,11 +312,14 @@ def find_similar_members(guild, description):
         name_lower = member.display_name.lower()
         username_lower = member.name.lower()
         score = max(similarity(description_lower, name_lower), similarity(description_lower, username_lower))
+        # Exact = le pseudo tapé correspond exactement
         if description_lower in [name_lower, username_lower]:
             exact.append(member)
+        # Similaire = le pseudo tapé est contenu dans le pseudo OU score >= 0.4
         elif description_lower in name_lower or description_lower in username_lower or score >= 0.4:
             similar.append((score, member))
     similar.sort(key=lambda x: x[0], reverse=True)
+    # Retirer les doublons avec exact
     return exact, [m for _, m in similar if m not in exact][:5]
 
 async def find_member(guild, description, channel):
@@ -260,6 +334,7 @@ async def find_member(guild, description, channel):
         except discord.NotFound:
             pass
         return [], [], True, False
+
     if description.startswith("<@") and description.endswith(">"):
         uid_str = description.strip("<@!>")
         try:
@@ -271,6 +346,7 @@ async def find_member(guild, description, channel):
             return [ban_entry.user], [], True, True
         except:
             return [], [], True, False
+
     exact, similar = find_similar_members(guild, description)
     return exact, similar, False, False
 
@@ -295,105 +371,6 @@ def get_channel_by_name(guild, name):
         if name.lower().replace("・", "") in ch.name.lower().replace("・", ""):
             return ch
     return None
-
-# ============================================================
-# ÉQUIPEMENT AUTO DU RÔLE PAR LE BOT
-# ============================================================
-async def equip_role_on_discord(member, guild, item):
-    """Attribue le rôle Discord correspondant à l'item équipé. Le crée si inexistant."""
-    role_id = item.get("id", "")
-    role_name = item.get("name", "")
-    color_hex = ROLE_COLORS_HEX.get(role_id, 0x99aab5)
-
-    # Chercher le rôle existant
-    role = discord.utils.get(guild.roles, name=role_name)
-
-    # Créer le rôle s'il n'existe pas
-    if not role:
-        try:
-            role = await guild.create_role(
-                name=role_name,
-                color=discord.Color(color_hex),
-                reason="Création automatique via boutique Prowler"
-            )
-        except discord.Forbidden:
-            return False, "Je n'ai pas la permission de créer des rôles."
-        except Exception as e:
-            return False, str(e)
-
-    # Retirer les anciens rôles couleur équipés
-    db = load_db()
-    data = get_member_data(db, member.id)
-    old_equipped = data.get("equipped", [])
-    for old_name in old_equipped:
-        old_role = discord.utils.get(guild.roles, name=old_name)
-        if old_role and old_role in member.roles:
-            try:
-                await member.remove_roles(old_role, reason="Déséquipement auto Prowler")
-            except:
-                pass
-
-    # Attribuer le nouveau rôle
-    try:
-        await member.add_roles(role, reason="Équipement auto via boutique Prowler")
-        return True, role_name
-    except discord.Forbidden:
-        return False, "Je n'ai pas la permission d'attribuer ce rôle."
-    except Exception as e:
-        return False, str(e)
-
-# ============================================================
-# PROMPTS IA
-# ============================================================
-SYSTEM_PROMPT = """Tu es un assistant de modération Discord.
-À partir d'un message en langage naturel, tu dois extraire l'action de modération voulue et retourner un JSON.
-
-Actions possibles: ban, kick, mute, warn, delete_messages, unmute, unban, show_profile, none
-
-Format de réponse JSON uniquement (pas de texte autour) :
-{
-  "action": "ban|kick|mute|warn|delete_messages|unmute|unban|show_profile|none",
-  "target": "mention ou description de l'utilisateur ciblé",
-  "duration_minutes": null ou nombre (pour mute),
-  "count": null ou nombre (pour delete_messages),
-  "reason": null,
-  "needs_clarification": false,
-  "clarification_question": null
-}
-
-Si la cible n'est pas claire, mets needs_clarification à true.
-Si aucune action de modération n'est détectée, mets action à "none".
-"""
-
-REASON_PROMPT = """Tu es un assistant de modération Discord.
-Reformule la raison donnée par un modérateur en une raison officielle, courte et professionnelle.
-Réponds UNIQUEMENT avec la raison reformulée, rien d'autre, pas de guillemets.
-"""
-
-ANALYSIS_PROMPT = """Analyse le comportement de cet utilisateur Discord basé sur ses derniers messages.
-Donne une appréciation courte (3-5 lignes max) mentionnant :
-- Son ton général (poli, agressif, neutre...)
-- S'il insulte souvent ou non
-- Son niveau d'activité dans les discussions
-- Une appréciation globale
-Réponds en français, de façon concise et professionnelle."""
-
-# ============================================================
-# COULEURS & LABELS
-# ============================================================
-ACTION_COLORS = {
-    "ban": 0xe74c3c, "kick": 0xe67e22, "mute": 0xf39c12,
-    "unmute": 0x2ecc71, "unban": 0x2ecc71, "warn": 0xf1c40f,
-    "delete_messages": 0x9b59b6,
-}
-ACTION_LABELS = {
-    "ban": "🔨 Bannissement", "kick": "👢 Kick", "mute": "🔇 Mute",
-    "unmute": "🔊 Demute", "unban": "✅ Déban", "warn": "⚠️ Avertissement",
-    "delete_messages": "🗑️ Suppression de messages",
-}
-RARITY_COLORS = {
-    "légendaire": 0xf1c40f, "épique": 0x9b59b6, "rare": 0x3498db, "commun": 0x95a5a6
-}
 
 # ============================================================
 # LOGS
@@ -555,25 +532,29 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
                 pass
         elif action == "delete_messages":
             count = action_data.get("count") or 10
+            deleted = 0
             deleted_by_channel = {}
+            # Chercher dans tous les salons texte (pas seulement publics)
+            all_text_channels = guild.text_channels
             all_msgs = []
-            for ch in guild.text_channels:
+            for ch in all_text_channels:
                 try:
                     async for msg in ch.history(limit=2000):
                         if msg.author.id == member.id:
                             all_msgs.append((msg, ch.name))
                 except:
                     continue
+            # Trier par date décroissante → les X plus récents
             all_msgs.sort(key=lambda x: x[0].created_at, reverse=True)
             for msg, ch_name in all_msgs[:count]:
                 try:
                     await msg.delete()
+                    deleted += 1
                     deleted_by_channel[ch_name] = deleted_by_channel.get(ch_name, 0) + 1
                 except:
                     pass
-            action_data["deleted_count"] = len(deleted_by_channel)
+            action_data["deleted_count"] = deleted
             action_data["deleted_by_channel"] = deleted_by_channel
-
         if action not in ["unmute", "unban", "delete_messages", "show_profile"]:
             data["sanctions"].append({
                 "type": action,
@@ -582,11 +563,10 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
                 "duration": action_data.get("duration_minutes")
             })
         save_db(db)
-
+        # Log pour rapport quotidien
         if moderator and action not in ["show_profile"]:
             tgt_name = member.display_name if hasattr(member, "display_name") else str(member)
             mod_commands_log.append((datetime.now(timezone.utc).timestamp(), moderator.display_name, action, tgt_name))
-
         color = ACTION_COLORS.get(action, 0x2ecc71)
         label = ACTION_LABELS.get(action, action)
         duration = action_data.get("duration_minutes")
@@ -600,24 +580,22 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
         if action == "warn":
             embed.add_field(name="Avertissements", value=f"{data['warns']}/3", inline=True)
         if action == "delete_messages":
-            deleted_count = sum(action_data.get("deleted_by_channel", {}).values())
+            deleted_count = action_data.get("deleted_count", 0)
             by_ch = action_data.get("deleted_by_channel", {})
             ch_detail = ", ".join([f"#{ch} ({n})" for ch, n in by_ch.items()]) if by_ch else "—"
             embed.add_field(name="🗑️ Messages supprimés", value=str(deleted_count), inline=True)
             embed.add_field(name="📍 Salons", value=ch_detail, inline=True)
         embed.set_footer(text=f"ID : {member.id}")
         await mod_channel.send(embed=embed)
-
         if action != "show_profile":
             extra = {"Durée": f"{duration} min" if duration else None}
             if action == "delete_messages":
-                deleted_count = sum(action_data.get("deleted_by_channel", {}).values())
+                deleted_count = action_data.get("deleted_count", 0)
                 by_ch = action_data.get("deleted_by_channel", {})
                 ch_detail = ", ".join([f"#{ch} ({n})" for ch, n in by_ch.items()]) if by_ch else "—"
                 extra["Messages supprimés"] = str(deleted_count)
                 extra["Salons"] = ch_detail
             await log_action(guild, action, moderator, member, reason=reason, extra=extra)
-
     except discord.Forbidden:
         await mod_channel.send(embed=discord.Embed(
             title="❌ Permission refusée",
@@ -699,12 +677,20 @@ async def show_profile(channel, member, guild, show_mod_data=True):
     embed.add_field(name="📅 Compte créé", value=created, inline=True)
     embed.add_field(name="📥 A rejoint le", value=joined, inline=True)
     embed.add_field(name="🎭 Rôles", value=roles_text, inline=False)
-    embed.add_field(name="⭐ Niveau & XP", value=f"Niveau **{level}** — {current_xp}/{needed_xp} XP\n`{progress_bar}`", inline=False)
+    embed.add_field(
+        name="⭐ Niveau & XP",
+        value=f"Niveau **{level}** — {current_xp}/{needed_xp} XP\n`{progress_bar}`",
+        inline=False
+    )
     embed.add_field(name="🪙 Pièces", value=str(data["coins"]), inline=True)
     embed.add_field(name="🔥 Streak daily", value=f"{data['daily_streak']} jours", inline=True)
     equipped = data.get("equipped", [])
     embed.add_field(name="👗 Rôle équipé", value=", ".join(equipped) if equipped else "Aucun", inline=True)
-    embed.add_field(name="📊 Activité", value=f"{data_msg['status']}\n~{data_msg['avg']} msgs/jour • {data_msg['total']} analysés", inline=False)
+    embed.add_field(
+        name="📊 Activité",
+        value=f"{data_msg['status']}\n~{data_msg['avg']} msgs/jour • {data_msg['total']} analysés",
+        inline=False
+    )
     embed.add_field(name="🤖 Appréciation IA", value=data_msg["ai"], inline=False)
     if show_mod_data:
         sanction_status = []
@@ -733,7 +719,8 @@ async def show_profile(channel, member, guild, show_mod_data=True):
             inline=False
         )
         if data.get("comments"):
-            embed.add_field(name="💬 Commentaires modos", value="\n".join([f"• {c}" for c in data["comments"]]), inline=False)
+            comments_text = "\n".join([f"• {c}" for c in data["comments"]])
+            embed.add_field(name="💬 Commentaires modos", value=comments_text, inline=False)
     embed.set_footer(text=f"Analyse basée sur {data_msg['total']} messages publics")
     await msg.edit(embed=embed)
     if show_mod_data:
@@ -767,110 +754,26 @@ async def cmd_profil(message):
     embed.add_field(name="👗 Rôle équipé", value=", ".join(equipped) if equipped else "Aucun", inline=True)
     await message.channel.send(embed=embed)
 
-# ============================================================
-# !INVENTAIRE AVEC RÉACTIONS
-# ============================================================
 async def cmd_inventaire(message):
     db = load_db()
     data = get_member_data(db, message.author.id)
     inventory = data.get("inventory", [])
-
     embed = discord.Embed(title=f"🎒 Inventaire — {message.author.display_name}", color=0x9b59b6)
     if not inventory:
         embed.description = "Tu n'as aucun article dans ton inventaire."
-        await message.channel.send(embed=embed)
-        return
-
-    emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    equipped = data.get("equipped", [])
-    lines = []
-    for i, item in enumerate(inventory[:10]):
-        eq_marker = " ✅" if item["name"] in equipped else ""
-        expires = f" *(expire le {item['expires']})*" if item.get("expires") else ""
-        lines.append(f"{emojis[i]} **{item['name']}**{eq_marker}{expires}")
-
-    embed.description = "\n".join(lines)
-    embed.set_footer(text="Réagis avec le numéro pour équiper un rôle")
-    inv_msg = await message.channel.send(embed=embed)
-
-    for i in range(len(inventory[:10])):
-        await inv_msg.add_reaction(emojis[i])
-
-    waiting_for_action_choice[inv_msg.id] = ("inventory_equip", message.author, inventory[:10], message.author.id)
-
-# ============================================================
-# ANIMATION !SPIN
-# ============================================================
-SPIN_FRAMES = [
-    "🎰 **|** 🍒 🍋 🍊 **|** *Spin en cours...*",
-    "🎰 **|** 🌟 💎 🍒 **|** *Les rouleaux tournent...*",
-    "🎰 **|** 🍊 🌟 💫 **|** *Presque...*",
-    "🎰 **|** 💎 🍋 🌟 **|** *Ça ralentit...*",
-    "🎰 **|** ❓ ❓ ❓ **|** *Et...*",
-]
-
-async def cmd_spin(message):
-    db = load_db()
-    data = get_member_data(db, message.author.id)
-    if data["coins"] < GACHA_COST:
-        await message.channel.send(f"❌ Tu n'as pas assez de pièces. (Tu as **{data['coins']}** 🪙, il faut **{GACHA_COST}** 🪙)")
-        return
-    shop = load_shop()
-    gacha_pool = shop["gacha"]
-    if not gacha_pool:
-        await message.channel.send("❌ Le gacha est vide pour l'instant.")
-        return
-
-    weights = []
-    for item in gacha_pool:
-        r = item.get("rarity", "commun")
-        if r == "légendaire": weights.append(2)
-        elif r == "épique": weights.append(8)
-        elif r == "rare": weights.append(20)
-        else: weights.append(70)
-
-    won_item = random.choices(gacha_pool, weights=weights, k=1)[0]
-
-    # --- Animation ---
-    spin_embed = discord.Embed(title="🎰 Gacha — Spin !", description=SPIN_FRAMES[0], color=0xf1c40f)
-    spin_embed.set_footer(text=f"Coût : {GACHA_COST} 🪙")
-    spin_msg = await message.channel.send(embed=spin_embed)
-
-    for frame in SPIN_FRAMES[1:]:
-        await asyncio.sleep(0.8)
-        spin_embed.description = frame
-        await spin_msg.edit(embed=spin_embed)
-
-    await asyncio.sleep(1.0)
-
-    # --- Résultat ---
-    data["coins"] -= GACHA_COST
-    already = any(i["id"] == won_item["id"] for i in data["inventory"])
-    if not already:
-        data["inventory"].append({"id": won_item["id"], "name": won_item["name"], "type": won_item["type"]})
-        result_txt = f"🎉 Tu as obtenu **{won_item['name']}** !"
     else:
-        refund = 10
-        data["coins"] += refund
-        result_txt = f"Tu as obtenu **{won_item['name']}** (déjà possédé → **+{refund}** 🪙 remboursés)"
-    save_db(db)
+        items_text = "\n".join([f"• **{item['name']}**" + (f" — expire le {item.get('expires', '?')}" if item.get('expires') else "") for item in inventory])
+        embed.description = items_text
+    await message.channel.send(embed=embed)
 
-    rarity = won_item.get("rarity", "commun")
-    color = RARITY_COLORS.get(rarity, 0x95a5a6)
-    rarity_weight = {"légendaire": 2, "épique": 8, "rare": 20, "commun": 70}
-    total_weight = sum(rarity_weight.get(i.get("rarity", "commun"), 70) for i in gacha_pool)
-    item_weight = rarity_weight.get(rarity, 70)
-    chance_pct = round((item_weight / total_weight) * 100, 2) if total_weight > 0 else 0
-    rarity_labels = {"légendaire": "🌟 Légendaire", "épique": "💜 Épique", "rare": "💙 Rare", "commun": "⬜ Commun"}
-
-    result_embed = discord.Embed(title="🎰 Résultat du Gacha !", color=color)
-    result_embed.add_field(name="🎁 Récompense", value=result_txt, inline=False)
-    result_embed.add_field(name="✨ Rareté", value=f"{rarity_labels.get(rarity, rarity)}", inline=True)
-    result_embed.add_field(name="🎯 Probabilité", value=f"**{chance_pct}%**", inline=True)
-    result_embed.add_field(name="🪙 Solde", value=str(data["coins"]), inline=True)
-    result_embed.set_footer(text=f"Coût : {GACHA_COST} 🪙")
-    await spin_msg.edit(embed=result_embed)
-    await log_action(message.guild, "gacha", None, message.author, extra={"Obtenu": won_item["name"], "Rareté": rarity})
+ROLE_COLORS_HEX = {
+    "role_bleu": 0x3498db, "role_rouge": 0xe74c3c, "role_vert": 0x2ecc71,
+    "role_violet": 0x9b59b6, "role_orange": 0xe67e22, "role_cyan": 0x1abc9c,
+    "role_jaune": 0xf1c40f, "role_magenta": 0xe91e8c, "role_blanc": 0xffffff,
+    "role_turquoise": 0x40e0d0, "role_corail": 0xff6b6b, "role_rose": 0xff69b4,
+    "role_noir": 0x2c2f33, "role_gold": 0xffd700, "role_arc_en_ciel": 0x9b59b6,
+    "role_bleu_temp": 0x3498db, "role_rouge_temp": 0xe74c3c,
+}
 
 async def cmd_boutique(message):
     shop = load_shop()
@@ -891,17 +794,27 @@ async def cmd_boutique(message):
         embed.add_field(name=f"🔄 Boutique rotative — {rotate_txt}", value=rotating_text, inline=False)
     embed.set_footer(text="!acheter [nom] pour acheter • !spin pour le gacha (50 🪙)")
     await message.channel.send(embed=embed)
+    # Gacha : un embed coloré par rôle
     gacha_items = shop.get("gacha", [])
     if gacha_items:
         rarity_weight = {"légendaire": 2, "épique": 8, "rare": 20, "commun": 70}
         total_w = sum(rarity_weight.get(i.get("rarity", "commun"), 70) for i in gacha_items)
         rarity_labels = {"légendaire": "🌟 Légendaire", "épique": "💜 Épique", "rare": "💙 Rare", "commun": "⬜ Commun"}
-        gacha_embed = discord.Embed(title="🎰 Gacha — Rôles disponibles", description=f"Prix : **{GACHA_COST}** 🪙 par spin\nUtilise `!spin` !", color=0xf1c40f)
+        gacha_embed = discord.Embed(title="🎰 Gacha — Rôles disponibles", description=f"Prix : **{GACHA_COST}** 🪙 par spin\nUtilise `!spin` pour tenter ta chance !", color=0xf1c40f)
         for item in gacha_items:
             rarity = item.get("rarity", "commun")
             w = rarity_weight.get(rarity, 70)
             pct = round((w / total_w) * 100, 2) if total_w > 0 else 0
-            gacha_embed.add_field(name=f"{item['name']}", value=f"{rarity_labels.get(rarity, rarity)} — **{pct}%**", inline=True)
+            color_hex = ROLE_COLORS_HEX.get(item["id"], 0x95a5a6)
+            r = (color_hex >> 16) & 0xFF
+            g = (color_hex >> 8) & 0xFF
+            b = color_hex & 0xFF
+            color_square = "🟥" if r > 200 and g < 100 else "🟦" if b > 200 and r < 100 else "🟩" if g > 200 and r < 100 else "🟨" if r > 200 and g > 200 else "🟪" if b > 150 and r > 100 else "⬜"
+            gacha_embed.add_field(
+                name=f"{color_square} {item['name']}",
+                value=f"{rarity_labels.get(rarity, rarity)}\n**{pct}%** de chance",
+                inline=True
+            )
         await message.channel.send(embed=gacha_embed)
 
 async def cmd_acheter(message, item_name):
@@ -933,7 +846,7 @@ async def cmd_acheter(message, item_name):
     save_db(db)
     embed = discord.Embed(
         title="✅ Achat réussi !",
-        description=f"Tu as acheté **{item['name']}** pour **{item['price']}** 🪙\nSolde restant : **{data['coins']}** 🪙\n\n💡 Utilise `!équiper {item['name']}` pour l'équiper !",
+        description=f"Tu as acheté **{item['name']}** pour **{item['price']}** 🪙\nSolde restant : **{data['coins']}** 🪙",
         color=0x2ecc71
     )
     await message.channel.send(embed=embed)
@@ -950,27 +863,61 @@ async def cmd_equiper(message, item_name):
     if not item:
         await message.channel.send(f"❌ Tu ne possèdes pas **{item_name}**. Achète-le d'abord !")
         return
-
-    # Équipement en BDD
     data["equipped"] = [item["name"]]
     save_db(db)
-
-    # Équipement Discord auto
-    success, result = await equip_role_on_discord(message.author, message.guild, item)
-    if success:
-        embed = discord.Embed(
-            title="👗 Rôle équipé !",
-            description=f"✅ Le rôle **{item['name']}** t'a été attribué automatiquement !",
-            color=ROLE_COLORS_HEX.get(item["id"], 0x3498db)
-        )
-    else:
-        embed = discord.Embed(
-            title="👗 Rôle équipé (partiellement)",
-            description=f"Le rôle **{item['name']}** est enregistré mais n'a pas pu être attribué : {result}",
-            color=0xf39c12
-        )
+    embed = discord.Embed(
+        title="👗 Rôle équipé !",
+        description=f"Tu as équipé **{item['name']}**.\n⚠️ Demande à un modo d'attribuer le rôle Discord correspondant.",
+        color=0x3498db
+    )
     await message.channel.send(embed=embed)
-    await log_action(message.guild, "shop_equip", None, message.author, extra={"Rôle équipé": item["name"], "Attribué": "✅" if success else "❌"})
+    await log_action(message.guild, "shop_equip", None, message.author, extra={"Rôle équipé": item["name"]})
+
+async def cmd_spin(message):
+    db = load_db()
+    data = get_member_data(db, message.author.id)
+    if data["coins"] < GACHA_COST:
+        await message.channel.send(f"❌ Tu n'as pas assez de pièces pour le gacha. (Tu as **{data['coins']}** 🪙, il faut **{GACHA_COST}** 🪙)")
+        return
+    shop = load_shop()
+    gacha_pool = shop["gacha"]
+    if not gacha_pool:
+        await message.channel.send("❌ Le gacha est vide pour l'instant.")
+        return
+    weights = []
+    for item in gacha_pool:
+        r = item.get("rarity", "commun")
+        if r == "légendaire": weights.append(2)
+        elif r == "épique": weights.append(8)
+        elif r == "rare": weights.append(20)
+        else: weights.append(70)
+    won_item = random.choices(gacha_pool, weights=weights, k=1)[0]
+    data["coins"] -= GACHA_COST
+    already = any(i["id"] == won_item["id"] for i in data["inventory"])
+    if not already:
+        data["inventory"].append({"id": won_item["id"], "name": won_item["name"], "type": won_item["type"]})
+        result_txt = f"Tu as obtenu **{won_item['name']}** !"
+    else:
+        refund = 10
+        data["coins"] += refund
+        result_txt = f"Tu as obtenu **{won_item['name']}** (déjà possédé → **+{refund}** 🪙 remboursés)"
+    save_db(db)
+    rarity = won_item.get("rarity", "commun")
+    color = RARITY_COLORS.get(rarity, 0x95a5a6)
+    # Calculer le % réel basé sur les poids du pool
+    rarity_weight = {"légendaire": 2, "épique": 8, "rare": 20, "commun": 70}
+    total_weight = sum(rarity_weight.get(i.get("rarity", "commun"), 70) for i in gacha_pool)
+    item_weight = rarity_weight.get(rarity, 70)
+    chance_pct = round((item_weight / total_weight) * 100, 2) if total_weight > 0 else 0
+    rarity_labels = {"légendaire": "🌟 Légendaire", "épique": "💜 Épique", "rare": "💙 Rare", "commun": "⬜ Commun"}
+    embed = discord.Embed(title="🎰 Résultat du Gacha !", color=color)
+    embed.add_field(name="🎁 Récompense", value=result_txt, inline=False)
+    embed.add_field(name="✨ Rareté", value=f"{rarity_labels.get(rarity, rarity)}", inline=True)
+    embed.add_field(name="🎯 Probabilité", value=f"**{chance_pct}%** de chance", inline=True)
+    embed.add_field(name="🪙 Solde", value=str(data["coins"]), inline=True)
+    embed.set_footer(text=f"Coût : {GACHA_COST} 🪙 • Légendaire : {round(2/total_weight*100,2)}% • Épique : {round(8/total_weight*100,2)}% • Rare : {round(20/total_weight*100,2)}% • Commun : {round(70/total_weight*100,2)}%")
+    await message.channel.send(embed=embed)
+    await log_action(message.guild, "gacha", None, message.author, extra={"Obtenu": won_item["name"], "Rareté": rarity})
 
 async def cmd_classement(message):
     db = load_db()
@@ -991,7 +938,7 @@ async def cmd_classement(message):
     await message.channel.send(embed=embed)
 
 async def cmd_daily(message):
-    channel_name = normalize_name(message.channel.name)
+    channel_name = message.channel.name.lower().replace("・", "")
     if "daily" not in channel_name:
         daily_ch = get_channel_by_name(message.guild, "daily")
         if daily_ch:
@@ -1003,7 +950,7 @@ async def cmd_daily(message):
     today = now.strftime("%Y-%m-%d")
     last = data.get("last_daily")
     if last == today:
-        await message.channel.send("⏳ Tu as déjà récupéré ta récompense aujourd'hui ! Reviens demain.")
+        await message.channel.send(f"⏳ Tu as déjà récupéré ta récompense aujourd'hui ! Reviens demain.")
         return
     yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
     if last == yesterday:
@@ -1060,10 +1007,12 @@ async def cmd_parrainer(message, args):
     )
     await message.channel.send(embed=embed)
 
+
 # ============================================================
-# COMMANDE !GIVE (Fondateur uniquement)
+# COMMANDE !GIVE (Fondateur uniquement, salon modération)
 # ============================================================
 async def cmd_give(message, args):
+    # Vérifier rôle Fondateur
     if not any(role.name in FOUNDER_ROLES for role in message.author.roles):
         if message.guild.owner_id != message.author.id:
             await message.channel.send(embed=discord.Embed(
@@ -1072,15 +1021,23 @@ async def cmd_give(message, args):
                 color=0xe74c3c
             ))
             return
+    # Usage: !give @membre [role:NomDuRole | coins:X]
     mentions = message.mentions
     if not mentions or not args:
         await message.channel.send(embed=discord.Embed(
             title="❓ Usage de !give",
-            description="`!give @membre role:NomDuRole` — donne un rôle Discord\n`!give @membre coins:500` — donne des pièces",
+            description=(
+                "`!give @membre role:NomDuRole` — donne un rôle Discord\n"
+                "`!give @membre coins:500` — donne des pièces\n\n"
+                "Exemples :\n"
+                "• `!give @Zertyx role:Rôle Gold`\n"
+                "• `!give @Zertyx coins:200`"
+            ),
             color=0x3498db
         ))
         return
     target = mentions[0]
+    # Retirer la mention du reste
     clean = args
     for m in message.mentions:
         clean = clean.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
@@ -1097,7 +1054,7 @@ async def cmd_give(message, args):
         save_db(db)
         embed = discord.Embed(
             title="🪙 Pièces données !",
-            description=f"**{amount}** 🪙 ont été ajoutées à {target.mention}\nNouveau solde : **{data['coins']}** 🪙",
+            description=f"**{amount}** 🪙 ont été ajoutées au compte de {target.mention}\nNouveau solde : **{data['coins']}** 🪙",
             color=0xf1c40f
         )
         embed.set_thumbnail(url=target.display_avatar.url)
@@ -1111,6 +1068,7 @@ async def cmd_give(message, args):
             return
         try:
             await target.add_roles(role, reason=f"!give par {message.author.display_name}")
+            # Ajouter à l'inventaire si rôle cosmétique
             db = load_db()
             data = get_member_data(db, target.id)
             already = any(i.get("name", "") == role_name for i in data["inventory"])
@@ -1206,12 +1164,17 @@ async def handle_member_resolution(channel, action_data, author_id, exact, simil
             color=0xe74c3c
         ))
         return
+
     if is_id and len(exact) == 1:
         action_data["resolved_member"] = exact[0]
         action_data["is_banned"] = is_banned
         if is_banned:
             user = exact[0]
-            embed = discord.Embed(title=f"🔨 {user.display_name} est banni", description="Cet utilisateur est actuellement banni.", color=0xe74c3c)
+            embed = discord.Embed(
+                title=f"🔨 {user.display_name} est banni",
+                description="Cet utilisateur est actuellement banni du serveur.",
+                color=0xe74c3c
+            )
             embed.set_thumbnail(url=user.display_avatar.url)
             embed.add_field(name="🆔 ID", value=f"`{user.id}`", inline=True)
             embed.set_footer(text="✅ débannir — 🔍 voir profil — ❌ annuler")
@@ -1227,15 +1190,25 @@ async def handle_member_resolution(channel, action_data, author_id, exact, simil
         if action_data.get("reason") and action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
             await send_confirmation(channel, action_data, author_id)
         elif action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
-            await channel.send(embed=discord.Embed(title="📝 Raison de la sanction", description="Quelle est la raison de cette sanction ?", color=0x3498db))
+            await channel.send(embed=discord.Embed(
+                title="📝 Raison de la sanction",
+                description="Quelle est la raison de cette sanction ?",
+                color=0x3498db
+            ))
             waiting_for_reason[author_id] = action_data
         else:
             await send_confirmation(channel, action_data, author_id)
         return
+
+    # Un seul candidat au total → confirmation "voulais-tu dire X ?" puis ⚔️/🔍
     if len(all_candidates) == 1:
         action_data["resolved_member"] = all_candidates[0]
         m = all_candidates[0]
-        embed = discord.Embed(title="🔍 Membre trouvé", description=f"Voulais-tu dire **{m.display_name}** (`{m.name}`) ?", color=0xf39c12)
+        embed = discord.Embed(
+            title="🔍 Membre trouvé",
+            description=f"Voulais-tu dire **{m.display_name}** (`{m.name}`) ?",
+            color=0xf39c12
+        )
         embed.set_thumbnail(url=m.display_avatar.url)
         embed.set_footer(text="✅ confirmer — ❌ annuler")
         bot_msg = await channel.send(embed=embed)
@@ -1243,6 +1216,8 @@ async def handle_member_resolution(channel, action_data, author_id, exact, simil
         await bot_msg.add_reaction("❌")
         waiting_for_member_choice[bot_msg.id] = (action_data, author_id, [m])
         return
+
+    # Plusieurs candidats → liste numérotée
     await ask_member_choice(channel, action_data, author_id, all_candidates)
 
 # ============================================================
@@ -1266,7 +1241,11 @@ async def send_daily_report(guild):
                 elif t == "kick": kicks.append((name, reason))
                 elif t in ["mute", "spam_mute"]: mutes.append((name, reason))
                 elif t == "warn": warns.append((name, reason))
-    embed = discord.Embed(title=f"📝 Rapport de modération — {today}", color=0x3498db, timestamp=datetime.now(timezone.utc))
+    embed = discord.Embed(
+        title=f"📝 Rapport de modération — {today}",
+        color=0x3498db,
+        timestamp=datetime.now(timezone.utc)
+    )
     def fmt_list(lst):
         if not lst: return "Aucun"
         return "\n".join([f"• **{n}** — {r}" for n, r in lst[:10]])
@@ -1274,6 +1253,15 @@ async def send_daily_report(guild):
     embed.add_field(name=f"👢 Kicks ({len(kicks)})", value=fmt_list(kicks), inline=False)
     embed.add_field(name=f"🔇 Mutes ({len(mutes)})", value=fmt_list(mutes), inline=False)
     embed.add_field(name=f"⚠️ Warns ({len(warns)})", value=fmt_list(warns), inline=False)
+    # Commandes utilisées par les modos
+    today_cmds = [(t, mod, act, tgt) for t, mod, act, tgt in mod_commands_log if datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m-%d") == today]
+    if today_cmds:
+        from collections import Counter
+        cmd_counts = Counter(f"{mod} → {act}" for _, mod, act, _ in today_cmds)
+        cmd_txt = "\n".join([f"• **{k}** × {v}" for k, v in cmd_counts.most_common(10)])
+        embed.add_field(name=f"🖱️ Actions modos ({len(today_cmds)})", value=cmd_txt or "Aucune", inline=False)
+    else:
+        embed.add_field(name="🖱️ Actions modos", value="Aucune action aujourd'hui", inline=False)
     embed.set_footer(text="Rapport automatique quotidien")
     await report_ch.send(embed=embed)
 
@@ -1366,14 +1354,16 @@ async def update_active_roles_loop():
 # HELP
 # ============================================================
 async def send_help(channel):
-    channel_name = normalize_name(channel.name)
+    import unicodedata
+    channel_name = unicodedata.normalize("NFD", channel.name.lower().replace("・", "")).encode("ascii", "ignore").decode("ascii")
     embed = discord.Embed(color=0x3498db, timestamp=datetime.now(timezone.utc))
+
     if "jeux" in channel_name:
         embed.title = "📖 Commandes — 🎮・jeux"
         embed.description = (
             "**Profil & Stats**\n"
             "`!profil` — voir ton niveau, pièces, rôles équipés\n"
-            "`!inventaire` — voir et équiper tes rôles (via réactions)\n"
+            "`!inventaire` — voir tous tes rôles achetés\n"
             "`!classement` — top des membres les plus actifs\n\n"
             "**Social**\n"
             "`!parrainer @pseudo` — parrainer un ami\n\n"
@@ -1386,21 +1376,25 @@ async def send_help(channel):
             "**Boutique & Gacha**\n"
             "`!boutique` — voir la boutique standard et rotative\n"
             "`!acheter [nom]` — acheter un article\n"
-            "`!équiper [nom]` — équiper un rôle (attribution auto !)\n"
+            "`!équiper [nom]` — équiper un rôle cosmétique\n"
             "`!spin` — tenter le gacha (50 🪙)\n\n"
             "💡 La boutique rotative se renouvelle toutes les **3h**"
         )
     elif "daily" in channel_name:
         embed.title = "📖 Commandes — 🎁・daily"
         embed.description = (
-            "`!daily` — récupère ta récompense quotidienne\n\n"
+            "`!daily` — récupère ta récompense quotidienne\n"
+            "`!info` ou `?info` — affiche cette aide\n\n"
             "🔥 **Streak bonus :**\n"
-            "**3 jours** → x1.5 | **7 jours** → x2\n"
-            "**14 jours** → x2.5 | **30 jours** → x3\n\n"
-            "💰 Base : 50 🪙 + 20 XP\n"
-            "⚠️ Si tu rates un jour → streak repart à 0 !"
+            "**3 jours** de suite → gains x1.5\n"
+            "**7 jours** de suite → gains x2\n"
+            "**14 jours** de suite → gains x2.5\n"
+            "**30 jours** de suite → gains x3\n\n"
+            "💰 **Récompense de base :** 50 🪙 + 20 XP\n"
+            "⚠️ Si tu rates un jour, ton streak repart à **0** !\n"
+            "📬 Le bot t'envoie un MP à chaque level up avec le détail de tes gains."
         )
-    elif "moderation" in channel_name:
+    elif "modération" in channel_name or "moderation" in channel_name:
         embed.title = "📖 Commandes — Modération"
         embed.description = (
             "Tu peux écrire en **langage naturel** :\n\n"
@@ -1410,11 +1404,8 @@ async def send_help(channel):
             "• `warn @pseudo` — avertit un membre\n"
             "• `unmute @pseudo` — démute un membre\n"
             "• `unban @pseudo` — débannit un membre\n"
-            "• `supprime 10 messages de @pseudo`\n"
-            "• `profil de @pseudo` — voir le profil complet\n\n"
-            "**Fondateur uniquement :**\n"
-            "• `!give @membre coins:500`\n"
-            "• `!give @membre role:NomDuRole`"
+            "• `supprime les 10 derniers messages de @pseudo` — supprime ses X derniers messages\n"
+            "• `profil de @pseudo` — voir le profil complet d'un membre"
         )
     elif "log" in channel_name:
         embed.title = "📖 Lecture des logs"
@@ -1423,7 +1414,7 @@ async def send_help(channel):
             "🔨 Bans • 👢 Kicks • 🔇 Mutes • ⚠️ Warns\n"
             "🔊 Demutes • ✅ Débans • 📥 Arrivées • 📤 Départs\n"
             "💬 Commentaires modos • 🤖 Mutes anti-spam\n"
-            "🛍️ Achats • 🎰 Gacha • 🎁 Daily • 👗 Équipements"
+            "🛍️ Achats • 🎰 Gacha • 🎁 Daily"
         )
     else:
         embed.title = "📖 Aide — Prowler Bot"
@@ -1434,6 +1425,7 @@ async def send_help(channel):
             "🎁・daily — récompense quotidienne\n\n"
             "Tape `?help` dans ces salons pour les commandes détaillées."
         )
+
     embed.set_footer(text="Prowler Bot")
     await channel.send(embed=embed)
 
@@ -1471,57 +1463,13 @@ async def on_reaction_add(reaction, user):
         return
     msg_id = reaction.message.id
 
-    # ============================================================
-    # INVENTAIRE — Équipement par réaction
-    # ============================================================
     if msg_id in waiting_for_action_choice:
-        choice_type, member, extra_data, requester_id = waiting_for_action_choice[msg_id]
-
-        if choice_type == "inventory_equip":
-            if user.id != requester_id:
-                return
-            emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-            if str(reaction.emoji) not in emojis:
-                return
-            idx = emojis.index(str(reaction.emoji))
-            inventory = extra_data
-            if idx >= len(inventory):
-                return
-            item = inventory[idx]
-            waiting_for_action_choice.pop(msg_id)
-
-            # Équiper en BDD
-            db = load_db()
-            data = get_member_data(db, member.id)
-            data["equipped"] = [item["name"]]
-            save_db(db)
-
-            # Équiper sur Discord
-            guild = reaction.message.guild
-            discord_member = guild.get_member(member.id)
-            if discord_member:
-                success, result = await equip_role_on_discord(discord_member, guild, item)
-                if success:
-                    embed = discord.Embed(
-                        title="👗 Rôle équipé !",
-                        description=f"✅ Le rôle **{item['name']}** t'a été attribué automatiquement !",
-                        color=ROLE_COLORS_HEX.get(item["id"], 0x3498db)
-                    )
-                else:
-                    embed = discord.Embed(
-                        title="👗 Rôle équipé (partiellement)",
-                        description=f"**{item['name']}** enregistré mais non attribué : {result}",
-                        color=0xf39c12
-                    )
-                await reaction.message.channel.send(embed=embed)
-                await log_action(guild, "shop_equip", None, discord_member, extra={"Rôle équipé": item["name"], "Via": "inventaire"})
-            return
+        choice_type, member, action_data, requester_id = waiting_for_action_choice[msg_id]
 
         if choice_type == "banned_choice":
             if user.id != requester_id:
                 return
             waiting_for_action_choice.pop(msg_id, None)
-            action_data = extra_data
             if str(reaction.emoji) == "✅":
                 action_data["action"] = "unban"
                 await send_confirmation(reaction.message.channel, action_data, requester_id)
@@ -1533,10 +1481,14 @@ async def on_reaction_add(reaction, user):
                 embed.add_field(name="🏷️ Pseudo", value=f"{member.name}", inline=True)
                 embed.add_field(name="🆔 ID", value=f"`{member.id}`", inline=True)
                 embed.add_field(name="⚡ Statut actuel", value="🔨 **Banni du serveur**", inline=False)
-                embed.add_field(name="🛡️ Historique sanctions",
-                    value=(f"⚠️ Warns total : {data['total_warns']}\n"
-                           f"🔇 Mutes : {data['mutes']} | 👢 Kicks : {data['kicks']} | 🔨 Bans : {data['bans']}"),
-                    inline=False)
+                embed.add_field(
+                    name="🛡️ Historique sanctions",
+                    value=(
+                        f"⚠️ Warns total : {data['total_warns']}\n"
+                        f"🔇 Mutes : {data['mutes']} | 👢 Kicks : {data['kicks']} | 🔨 Bans : {data['bans']}"
+                    ),
+                    inline=False
+                )
                 if data.get("comments"):
                     embed.add_field(name="💬 Commentaires modos", value="\n".join([f"• {c}" for c in data["comments"]]), inline=False)
                 await reaction.message.channel.send(embed=embed)
@@ -1547,11 +1499,11 @@ async def on_reaction_add(reaction, user):
         if choice_type == "sanction_or_profile":
             if user.id != requester_id:
                 return
-            action_data = extra_data
             waiting_for_action_choice.pop(msg_id)
             if str(reaction.emoji) == "⚔️":
                 if action_data.get("action") in ["ban", "kick", "mute", "warn", "delete_messages"]:
                     if action_data.get("reason"):
+                        # Raison déjà connue (ex: "supprime 18 msgs de X") → confirmation directe
                         await send_confirmation(reaction.message.channel, action_data, requester_id)
                     else:
                         await reaction.message.channel.send(embed=discord.Embed(
@@ -1610,11 +1562,13 @@ async def on_reaction_add(reaction, user):
                     save_db(db)
                     waiting_for_action_choice.pop(msg_id, None)
                     waiting_for_comment.pop(user.id, None)
-                    await reaction.message.channel.send(embed=discord.Embed(title="✅ Commentaire supprimé", color=0x2ecc71))
-                    target_member = reaction.message.guild.get_member(member.id)
-                    await log_action(reaction.message.guild, "comment_remove",
-                                     reaction.message.guild.get_member(user.id), target_member,
-                                     extra={"Commentaire supprimé": removed})
+                    await reaction.message.channel.send(embed=discord.Embed(
+                        title="✅ Commentaire supprimé",
+                        description=f"Le commentaire a été supprimé.",
+                        color=0x2ecc71
+                    ))
+                    target = reaction.message.guild.get_member(member.id)
+                    await log_action(reaction.message.guild, "comment_remove", mod_member if 'mod_member' in dir() else None, target, extra={"Commentaire supprimé": removed})
         return
 
     if msg_id in waiting_for_member_choice:
@@ -1625,10 +1579,8 @@ async def on_reaction_add(reaction, user):
         if str(reaction.emoji) == "✅" and len(candidates) == 1:
             waiting_for_member_choice.pop(msg_id)
             action_data["resolved_member"] = candidates[0]
-            if action_data.get("action") == "show_profile":
-                await show_profile(reaction.message.channel, candidates[0], reaction.message.guild)
-            else:
-                await ask_action_choice(reaction.message.channel, candidates[0], action_data, requester_id)
+            # Toujours proposer ⚔️/🔍 après confirmation
+            await ask_action_choice(reaction.message.channel, candidates[0], action_data, requester_id)
             return
         if str(reaction.emoji) == "❌":
             waiting_for_member_choice.pop(msg_id)
@@ -1662,24 +1614,32 @@ async def on_message(message):
     if message.author.bot:
         return
 
+    import unicodedata
+    def normalize_name(s):
+        s = s.lower().replace("・", "")
+        return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("ascii")
     channel_name = normalize_name(message.channel.name)
     content = message.content.strip()
     content_lower = content.lower()
 
+    # --- Suivi activité membre ---
     mid = str(message.author.id)
     today = datetime.now(timezone.utc).date().isoformat()
     if mid not in member_message_days:
         member_message_days[mid] = {}
     member_message_days[mid][today] = member_message_days[mid].get(today, 0) + 1
 
+    # --- XP & pièces sur chaque message ---
     is_boosted = update_boost(message.author.id)
     coin_gain = COINS_BOOST if is_boosted else COINS_PER_MESSAGE
     await add_xp_and_coins(message.author, message.guild, XP_PER_MESSAGE, coin_gain)
 
+    # --- Commande !help / ?help ---
     if content_lower in ["!help", "?help"]:
         await send_help(message.channel)
         return
 
+    # --- Commandes salon jeux ---
     if "jeux" in channel_name:
         if content_lower == "!profil":
             await cmd_profil(message)
@@ -1704,6 +1664,7 @@ async def on_message(message):
                 await message.channel.send(f"❌ La commande `!daily` est réservée à {daily_ch.mention} !")
             return
 
+    # --- Commandes salon boutique ---
     if "boutique" in channel_name:
         if content_lower == "!boutique":
             await cmd_boutique(message)
@@ -1718,10 +1679,12 @@ async def on_message(message):
             await cmd_spin(message)
             return
 
+    # --- Commande daily ---
     if content_lower == "!daily":
         await cmd_daily(message)
         return
 
+    # --- Salon modération uniquement pour les commandes de mod ---
     if "moderation" not in channel_name:
         return
 
@@ -1733,10 +1696,12 @@ async def on_message(message):
         ))
         return
 
+    # --- Commande !give (Fondateur) ---
     if content_lower.startswith("!give"):
         await cmd_give(message, content[5:].strip())
         return
 
+    # --- Attente de commentaire ---
     if message.author.id in waiting_for_comment:
         member_id, action, extra = waiting_for_comment[message.author.id]
         if action == "add":
@@ -1747,10 +1712,13 @@ async def on_message(message):
             data["comments"].append(comment_text)
             save_db(db)
             target = message.guild.get_member(member_id)
-            await message.channel.send(embed=discord.Embed(title="✅ Commentaire ajouté", description=comment_text, color=0x2ecc71))
+            await message.channel.send(embed=discord.Embed(
+                title="✅ Commentaire ajouté", description=comment_text, color=0x2ecc71
+            ))
             await log_action(message.guild, "comment_add", message.author, target, extra={"Commentaire": message.content})
         return
 
+    # --- Attente de raison ---
     if message.author.id in waiting_for_reason:
         action_data = waiting_for_reason.pop(message.author.id)
         async with message.channel.typing():
@@ -1759,11 +1727,13 @@ async def on_message(message):
         await send_confirmation(message.channel, action_data, message.author.id)
         return
 
+    # --- Anti-spam ---
     if not has_permission(message.author):
         spammed = await check_spam(message)
         if spammed:
             return
 
+    # --- Analyse IA de la commande ---
     action_data = None
     try:
         async with message.channel.typing():
@@ -1779,13 +1749,24 @@ async def on_message(message):
             raw = raw.strip()
             action_data = json.loads(raw)
     except json.JSONDecodeError:
+        # Réponse IA mal formée → traiter le message brut comme un pseudo
         action_data = {"action": "none", "target": message.content.strip(), "needs_clarification": False}
     except Exception as e:
-        await message.channel.send(embed=discord.Embed(title="❌ Erreur IA", description=f"```{e}```", color=0xe74c3c))
+        await message.channel.send(embed=discord.Embed(
+            title="❌ Erreur IA",
+            description=f"```{e}```",
+            color=0xe74c3c
+        ))
         return
 
     if action_data.get("action") == "none":
-        target = action_data.get("target", "").strip() or message.content.strip().split()[0]
+        # Utiliser le target IA s'il existe, sinon fallback sur le message brut UNIQUEMENT si c'est un mot seul (pseudo)
+        target = action_data.get("target", "").strip()
+        if not target:
+            words = message.content.strip().split()
+            # Fallback seulement si le message est un seul mot (pseudo brut)
+            if len(words) == 1:
+                target = words[0]
         if target:
             exact, similar, is_id, is_banned = await find_member(message.guild, target, message.channel)
             all_candidates = exact + similar
@@ -1793,7 +1774,12 @@ async def on_message(message):
                 action_data["action"] = "show_profile"
                 action_data["target"] = target
                 action_data["resolved_member"] = all_candidates[0]
-                await ask_action_choice(message.channel, all_candidates[0], action_data, message.author.id)
+                if len(all_candidates) == 1:
+                    await ask_action_choice(message.channel, all_candidates[0], action_data, message.author.id)
+                else:
+                    await handle_member_resolution(message.channel, action_data, message.author.id, exact, similar, is_id, is_banned)
+                return
+        # Aucun membre trouvé → ignorer silencieusement
         return
 
     if action_data.get("action") == "show_profile" and not action_data.get("target"):

@@ -28,44 +28,30 @@ mod_commands_log = []
 # ============================================================
 # HIÉRARCHIE DES RÔLES
 # ============================================================
-# Plus l'index est bas, plus le rôle est puissant
 ROLE_HIERARCHY = ["Fondateur", "Modérateur"]
 
 def get_role_level(member):
-    """Retourne le niveau de puissance du membre (0 = plus puissant, 99 = simple membre)."""
     for i, role_name in enumerate(ROLE_HIERARCHY):
         if any(r.name == role_name for r in member.roles):
             return i
     return 99
 
 def can_sanction(moderator, target):
-    """
-    Vérifie si le modérateur peut sanctionner la cible.
-    Retourne (True, None) si autorisé, (False, raison) sinon.
-    """
-    # Le bot ne peut pas être sanctionné
     if target.bot:
         return False, "Tu ne peux pas sanctionner un bot."
-
     mod_level = get_role_level(moderator)
     target_level = get_role_level(target)
-
-    # Un modérateur ne peut pas sanctionner quelqu'un de niveau >= au sien
     if target_level <= mod_level:
         target_role = next((r.name for r in target.roles if r.name in ROLE_HIERARCHY), "Membre")
         return False, f"Tu ne peux pas sanctionner **{target.display_name}** qui est **{target_role}**."
-
     return True, None
 
 async def report_unauthorized_sanction(guild, moderator, target, action_attempted):
-    """Envoie un rapport dans rapport-prowler quand une sanction non autorisée est tentée."""
     report_ch = get_channel_by_name(guild, "rapport-prowler")
     if not report_ch:
         return
-
     target_role = next((r.name for r in target.roles if r.name in ROLE_HIERARCHY), "Membre")
     mod_role = next((r.name for r in moderator.roles if r.name in ROLE_HIERARCHY), "Membre")
-
     embed = discord.Embed(
         title="🚨 Tentative de sanction non autorisée",
         color=0xFF0000,
@@ -77,7 +63,6 @@ async def report_unauthorized_sanction(guild, moderator, target, action_attempte
     embed.add_field(name="📅 Date", value=datetime.now(timezone.utc).strftime("%d/%m/%Y à %H:%M UTC"), inline=True)
     embed.set_footer(text="Rapport automatique — Prowler Bot")
     await report_ch.send(embed=embed)
-
 
 # ============================================================
 # DÉTECTION D'INTENTION
@@ -104,7 +89,6 @@ async def is_moderation_command(message_content: str) -> bool:
         return "OUI" in answer
     except Exception:
         return True
-
 
 # ============================================================
 # PROFIL
@@ -193,7 +177,6 @@ async def show_profile(channel, member, guild, show_mod_data=True):
         await action_msg.add_reaction("➖")
         waiting_for_action_choice[action_msg.id] = ("comment_mgmt", member, None, None)
 
-
 # ============================================================
 # EXECUTE ACTION
 # ============================================================
@@ -202,15 +185,13 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
     if not member:
         await mod_channel.send("❌ Aucun membre résolu.")
         return
-
     action = action_data.get("action")
-
     if action == "show_profile":
         await show_profile(mod_channel, member, guild)
         await log_action(guild, "show_profile", moderator, member)
         return
 
-    # ── Vérification hiérarchie ──
+    # Vérification hiérarchie
     if moderator and action in ["ban", "kick", "mute", "warn", "delete_messages"]:
         authorized, reason_denied = can_sanction(moderator, member)
         if not authorized:
@@ -225,7 +206,6 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
     reason = action_data.get("reason", "Aucune raison spécifiée")
     db = load_db()
     data = get_member_data(db, member.id)
-
     try:
         if action == "ban":
             await member.ban(reason=reason)
@@ -248,9 +228,7 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
             data["warns"] = min(data["warns"] + 1, 3)
             data["total_warns"] += 1
             try:
-                await member.send(
-                    f"⚠️ Tu as reçu un avertissement sur **{guild.name}** : {reason}"
-                )
+                await member.send(f"⚠️ Tu as reçu un avertissement sur **{guild.name}** : {reason}")
             except:
                 pass
         elif action == "delete_messages":
@@ -318,9 +296,8 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
             if action == "delete_messages":
                 deleted_count = action_data.get("deleted_count", 0)
                 by_ch = action_data.get("deleted_by_channel", {})
-                ch_detail = ", ".join([f"#{ch} ({n})" for ch, n in by_ch.items()]) if by_ch else "—"
                 extra["Messages supprimés"] = str(deleted_count)
-                extra["Salons"] = ch_detail
+                extra["Salons"] = ", ".join([f"#{ch} ({n})" for ch, n in by_ch.items()]) or "—"
             await log_action(guild, action, moderator, member, reason=reason, extra=extra)
 
     except discord.Forbidden:
@@ -331,7 +308,6 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
         ))
     except Exception as e:
         await mod_channel.send(f"❌ Erreur : {e}")
-
 
 # ============================================================
 # CONFIRMATION & CHOIX
@@ -457,87 +433,136 @@ async def handle_member_resolution(channel, action_data, author_id, exact, simil
         return
     await ask_member_choice(channel, action_data, author_id, all_candidates)
 
-
 # ============================================================
-# GIVE (Fondateur)
+# GIVE (Fondateur) — formats acceptés :
+#   !give @membre 500
+#   !give @membre 500 pieces
+#   !give @membre coins:500
+#   !give @membre role:NomDuRole
 # ============================================================
 async def cmd_give(message, args):
-    if not any(role.name in FOUNDER_ROLES for role in message.author.roles):
-        if message.guild.owner_id != message.author.id:
-            await message.channel.send(embed=discord.Embed(
-                title="❌ Permission refusée",
-                description="Seul le **Fondateur** peut utiliser `!give`.",
-                color=0xe74c3c
-            ))
-            return
+    # Vérif permission Fondateur
+    is_founder = any(role.name in FOUNDER_ROLES for role in message.author.roles)
+    is_owner = message.guild.owner_id == message.author.id
+    if not is_founder and not is_owner:
+        await message.channel.send(embed=discord.Embed(
+            title="❌ Permission refusée",
+            description="Seul le **Fondateur** peut utiliser `!give`.",
+            color=0xe74c3c
+        ))
+        return
+
     mentions = message.mentions
     if not mentions or not args:
         await message.channel.send(embed=discord.Embed(
             title="❓ Usage de !give",
             description=(
-                "`!give @membre role:NomDuRole` — donne un rôle Discord\n"
-                "`!give @membre coins:500` — donne des pièces\n\n"
-                "Exemples :\n• `!give @Zertyx role:Rôle Gold`\n• `!give @Zertyx coins:200`"
+                "**Pièces :**\n"
+                "`!give @membre 500` — donne 500 pièces\n"
+                "`!give @membre 500 pieces` — même chose\n"
+                "`!give @membre coins:500` — même chose\n\n"
+                "**Rôle :**\n"
+                "`!give @membre role:NomDuRole` — donne un rôle Discord\n\n"
+                "Exemples :\n"
+                "• `!give @Zertyx 1000000`\n"
+                "• `!give @Zertyx role:Rôle Gold`"
             ),
             color=0x3498db
         ))
         return
+
     target = mentions[0]
+
+    # Nettoyer les mentions du texte
     clean = args
     for m in message.mentions:
         clean = clean.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
     clean = clean.strip()
+
+    # Format: role:NomDuRole
+    if clean.lower().startswith("role:"):
+        role_name = clean[5:].strip()
+        await _give_role(message, target, role_name)
+        return
+
+    # Format: coins:500
     if clean.lower().startswith("coins:"):
         try:
-            amount = int(clean[6:].strip())
+            amount = int(clean[6:].strip().split()[0])
         except:
             await message.channel.send("❌ Format invalide. Ex: `!give @membre coins:200`")
             return
+        await _give_coins(message, target, amount)
+        return
+
+    # Format: 500 [piece/pieces/pièces/coins/...] — le plus simple
+    parts = clean.split()
+    if parts and parts[0].lstrip("-").isdigit():
+        try:
+            amount = int(parts[0])
+        except:
+            await message.channel.send("❌ Montant invalide.")
+            return
+        if amount <= 0:
+            await message.channel.send("❌ Le montant doit être supérieur à 0.")
+            return
+        await _give_coins(message, target, amount)
+        return
+
+    # Rien de reconnu
+    await message.channel.send(
+        "❌ Format invalide.\n"
+        "Exemples : `!give @membre 500` • `!give @membre coins:500` • `!give @membre role:Rôle Gold`"
+    )
+
+
+async def _give_coins(message, target, amount):
+    """Donne des pièces à un membre."""
+    db = load_db()
+    data = get_member_data(db, target.id)
+    data["coins"] += amount
+    save_db(db)
+    embed = discord.Embed(
+        title="🪙 Pièces données !",
+        description=(
+            f"**{amount:,}** 🪙 ont été ajoutées au compte de {target.mention}\n"
+            f"Nouveau solde : **{data['coins']:,}** 🪙"
+        ),
+        color=0xf1c40f
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+    await message.channel.send(embed=embed)
+    await log_action(message.guild, "give_coins", message.author, target,
+                     extra={"Pièces": f"+{amount}", "Solde": data["coins"]})
+
+
+async def _give_role(message, target, role_name):
+    """Donne un rôle Discord à un membre."""
+    role = discord.utils.get(message.guild.roles, name=role_name)
+    if not role:
+        await message.channel.send(f"❌ Rôle **{role_name}** introuvable sur le serveur.")
+        return
+    try:
+        await target.add_roles(role, reason=f"!give par {message.author.display_name}")
         db = load_db()
         data = get_member_data(db, target.id)
-        data["coins"] += amount
-        save_db(db)
+        already = any(i.get("name", "") == role_name for i in data["inventory"])
+        if not already:
+            data["inventory"].append({
+                "id": role_name.lower().replace(" ", "_"),
+                "name": role_name,
+                "type": "role_color"
+            })
+            save_db(db)
         embed = discord.Embed(
-            title="🪙 Pièces données !",
-            description=(
-                f"**{amount}** 🪙 ont été ajoutées au compte de {target.mention}\n"
-                f"Nouveau solde : **{data['coins']}** 🪙"
-            ),
-            color=0xf1c40f
+            title="🎁 Rôle donné !",
+            description=f"Le rôle **{role_name}** a été attribué à {target.mention}",
+            color=role.color.value if role.color.value else 0x2ecc71
         )
         embed.set_thumbnail(url=target.display_avatar.url)
         await message.channel.send(embed=embed)
-        await log_action(message.guild, "give_coins", message.author, target,
-                         extra={"Pièces": f"+{amount}", "Solde": data["coins"]})
-    elif clean.lower().startswith("role:"):
-        role_name = clean[5:].strip()
-        role = discord.utils.get(message.guild.roles, name=role_name)
-        if not role:
-            await message.channel.send(f"❌ Rôle **{role_name}** introuvable sur le serveur.")
-            return
-        try:
-            await target.add_roles(role, reason=f"!give par {message.author.display_name}")
-            db = load_db()
-            data = get_member_data(db, target.id)
-            already = any(i.get("name", "") == role_name for i in data["inventory"])
-            if not already:
-                data["inventory"].append({
-                    "id": role_name.lower().replace(" ", "_"),
-                    "name": role_name,
-                    "type": "role_color"
-                })
-                save_db(db)
-            embed = discord.Embed(
-                title="🎁 Rôle donné !",
-                description=f"Le rôle **{role_name}** a été attribué à {target.mention}",
-                color=role.color.value if role.color.value else 0x2ecc71
-            )
-            embed.set_thumbnail(url=target.display_avatar.url)
-            await message.channel.send(embed=embed)
-            await log_action(message.guild, "give_role", message.author, target, extra={"Rôle": role_name})
-        except discord.Forbidden:
-            await message.channel.send(
-                f"❌ Je n'ai pas la permission d'attribuer le rôle **{role_name}**."
-            )
-    else:
-        await message.channel.send("❌ Format invalide. Utilise `role:NomDuRole` ou `coins:X`")
+        await log_action(message.guild, "give_role", message.author, target, extra={"Rôle": role_name})
+    except discord.Forbidden:
+        await message.channel.send(
+            f"❌ Je n'ai pas la permission d'attribuer le rôle **{role_name}**."
+        )

@@ -8,18 +8,23 @@ from openai import OpenAI
 from collections import defaultdict
 
 # ============================================================
+# IMPORTS DB (fix principal — plus de db.json local)
+# ============================================================
+from db import load_db, save_db, get_member_data
+
+# ============================================================
 # CONFIG
 # ============================================================
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
-ALLOWED_ROLES = ["Modérateur"]
+ALLOWED_ROLES = ["Modérateur", "Fondateur"]
 FOUNDER_ROLES = ["Fondateur"]
 MOD_CHANNEL = "modération"
 LOG_CHANNEL = "📋・logs"
 GENERAL_CHANNEL = "💬・chat-général"
 REPORT_CHANNEL = "📝・rapport-prowler"
-REPORT_HOUR = 22
+REPORT_HOUR = 20  # 20h UTC = 22h FR
 
 ROLE_MEMBRE = "Membre"
 ROLE_MEMBRE_ACTIF = "Membre Actif"
@@ -30,7 +35,6 @@ INACTIVE_DAYS_REQUIRED = 2
 SPAM_THRESHOLD = 10
 SPAM_WINDOW = 30
 
-# ✅ MODÈLE IA — changé car google/gemma-3-4b-it:free avait son quota épuisé
 AI_MODEL = "mistralai/mistral-7b-instruct:free"
 # ============================================================
 
@@ -51,27 +55,6 @@ waiting_for_action_choice = {}
 waiting_for_comment = {}
 spam_tracker = {}
 member_message_days = {}
-
-DB_FILE = "db.json"
-
-def load_db():
-    if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-def save_db(db):
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(db, f, ensure_ascii=False, indent=2)
-
-def get_member_data(db, member_id):
-    mid = str(member_id)
-    if mid not in db:
-        db[mid] = {
-            "warns": 0, "total_warns": 0, "mutes": 0, "kicks": 0, "bans": 0,
-            "spam_mute_count": 0, "comments": [], "sanctions": []
-        }
-    return db[mid]
 
 # ============================================================
 # PROMPTS IA
@@ -332,7 +315,7 @@ async def apply_spam_mute(message):
                      extra={"Durée": duration_txt, "Warns": f"{data['warns']}/3"})
 
 # ============================================================
-# GIVE (Fondateur)
+# GIVE (Fondateur) — utilise /data/db.json via db.py
 # ============================================================
 async def cmd_give(message, args):
     if not is_founder(message.author):
@@ -383,7 +366,7 @@ async def cmd_give(message, args):
                     "id": role_name.lower().replace(" ", "_"),
                     "name": role_name, "type": "role_color"
                 })
-                save_db(db)
+            save_db(db)
             embed = discord.Embed(
                 title="🎁 Rôle donné !",
                 description=f"Le rôle **{role_name}** a été attribué à {target.mention}",
@@ -396,7 +379,7 @@ async def cmd_give(message, args):
             await message.channel.send(f"❌ Je n'ai pas la permission d'attribuer le rôle **{role_name}**.")
         return
 
-    # Format: coins:500 ou juste 500
+    # Format: coins:500 ou juste 500 [piece/pieces/...]
     if clean.lower().startswith("coins:"):
         try:
             amount = int(clean[6:].strip().split()[0])
@@ -423,9 +406,13 @@ async def cmd_give(message, args):
     data = get_member_data(db, target.id)
     data["coins"] = data.get("coins", 0) + amount
     save_db(db)
+
     embed = discord.Embed(
         title="🪙 Pièces données !",
-        description=f"**{amount:,}** 🪙 ont été ajoutées au compte de {target.mention}\nNouveau solde : **{data['coins']:,}** 🪙",
+        description=(
+            f"**{amount:,}** 🪙 ont été ajoutées au compte de {target.mention}\n"
+            f"Nouveau solde : **{data['coins']:,}** 🪙"
+        ),
         color=0xf1c40f
     )
     embed.set_thumbnail(url=target.display_avatar.url)
@@ -476,11 +463,27 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
                 pass
         elif action == "delete_messages":
             count = action_data.get("count") or 10
+            all_msgs = []
+            for ch in guild.text_channels:
+                try:
+                    async for msg in ch.history(limit=2000):
+                        if msg.author.id == member.id:
+                            all_msgs.append((msg, ch.name))
+                except:
+                    continue
+            all_msgs.sort(key=lambda x: x[0].created_at, reverse=True)
             deleted = 0
-            async for msg in mod_channel.history(limit=200):
-                if msg.author == member and deleted < count:
+            deleted_by_channel = {}
+            for msg, ch_name in all_msgs[:count]:
+                try:
                     await msg.delete()
                     deleted += 1
+                    deleted_by_channel[ch_name] = deleted_by_channel.get(ch_name, 0) + 1
+                except:
+                    pass
+            action_data["deleted_count"] = deleted
+            action_data["deleted_by_channel"] = deleted_by_channel
+
         if action not in ["unmute", "unban", "delete_messages", "show_profile"]:
             data["sanctions"].append({
                 "type": action,
@@ -489,6 +492,7 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
                 "duration": action_data.get("duration_minutes")
             })
         save_db(db)
+
         color = ACTION_COLORS.get(action, 0x2ecc71)
         label = ACTION_LABELS.get(action, action)
         duration = action_data.get("duration_minutes")
@@ -501,11 +505,24 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
             embed.add_field(name="Raison", value=reason, inline=False)
         if action == "warn":
             embed.add_field(name="Avertissements", value=f"{data['warns']}/3", inline=True)
+        if action == "delete_messages":
+            deleted_count = action_data.get("deleted_count", 0)
+            by_ch = action_data.get("deleted_by_channel", {})
+            ch_detail = ", ".join([f"#{ch} ({n})" for ch, n in by_ch.items()]) if by_ch else "—"
+            embed.add_field(name="🗑️ Messages supprimés", value=str(deleted_count), inline=True)
+            embed.add_field(name="📍 Salons", value=ch_detail, inline=True)
         embed.set_footer(text=f"ID : {member.id}")
         await mod_channel.send(embed=embed)
+
         if action != "show_profile":
-            await log_action(guild, action, moderator, member, reason=reason,
-                             extra={"Durée": f"{duration} min" if duration else None})
+            extra = {"Durée": f"{duration} min" if duration else None}
+            if action == "delete_messages":
+                deleted_count = action_data.get("deleted_count", 0)
+                by_ch = action_data.get("deleted_by_channel", {})
+                extra["Messages supprimés"] = str(deleted_count)
+                extra["Salons"] = ", ".join([f"#{ch} ({n})" for ch, n in by_ch.items()]) or "—"
+            await log_action(guild, action, moderator, member, reason=reason, extra=extra)
+
     except discord.Forbidden:
         await mod_channel.send(embed=discord.Embed(
             title="❌ Permission refusée",
@@ -573,10 +590,14 @@ async def show_profile(channel, member, guild, show_mod_data=True):
     data_msg = await analyze_member_messages(guild, member)
     db = load_db()
     data = get_member_data(db, member.id)
+    from economy import get_level_from_xp
     roles = [r.mention for r in member.roles if r.name != "@everyone"]
     roles_text = ", ".join(roles) if roles else "Aucun rôle"
     joined = member.joined_at.strftime("%d/%m/%Y") if member.joined_at else "Inconnu"
     created = member.created_at.strftime("%d/%m/%Y")
+    level, current_xp, needed_xp = get_level_from_xp(data.get("xp", 0))
+    progress = int((current_xp / needed_xp) * 10) if needed_xp > 0 else 0
+    progress_bar = "█" * progress + "░" * (10 - progress)
     embed = discord.Embed(title=f"👤 Profil — {member.display_name}", color=0x3498db)
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.add_field(name="🏷️ Pseudo", value=f"{member.name}", inline=True)
@@ -584,6 +605,15 @@ async def show_profile(channel, member, guild, show_mod_data=True):
     embed.add_field(name="📅 Compte créé", value=created, inline=True)
     embed.add_field(name="📥 A rejoint le", value=joined, inline=True)
     embed.add_field(name="🎭 Rôles", value=roles_text, inline=False)
+    embed.add_field(
+        name="⭐ Niveau & XP",
+        value=f"Niveau **{level}** — {current_xp}/{needed_xp} XP\n`{progress_bar}`",
+        inline=False
+    )
+    embed.add_field(name="🪙 Pièces", value=str(data.get("coins", 0)), inline=True)
+    embed.add_field(name="🔥 Streak daily", value=f"{data.get('daily_streak', 0)} jours", inline=True)
+    equipped = data.get("equipped", [])
+    embed.add_field(name="👗 Rôle équipé", value=", ".join(equipped) if equipped else "Aucun", inline=True)
     embed.add_field(
         name="📊 Activité",
         value=f"{data_msg['status']}\n~{data_msg['avg']} msgs/jour • {data_msg['total']} analysés",
@@ -611,13 +641,17 @@ async def show_profile(channel, member, guild, show_mod_data=True):
         embed.add_field(
             name="🛡️ Historique sanctions",
             value=(
-                f"⚠️ Warns actuels : **{data['warns']}/3** (total : {data['total_warns']})\n"
-                f"🔇 Mutes : {data['mutes']} | 👢 Kicks : {data['kicks']} | 🔨 Bans : {data['bans']}"
+                f"⚠️ Warns actuels : **{data.get('warns', 0)}/3** (total : {data.get('total_warns', 0)})\n"
+                f"🔇 Mutes : {data.get('mutes', 0)} | 👢 Kicks : {data.get('kicks', 0)} | 🔨 Bans : {data.get('bans', 0)}"
             ),
             inline=False
         )
         if data.get("comments"):
-            embed.add_field(name="💬 Commentaires modos", value="\n".join([f"• {c}" for c in data["comments"]]), inline=False)
+            embed.add_field(
+                name="💬 Commentaires modos",
+                value="\n".join([f"• {c}" for c in data["comments"]]),
+                inline=False
+            )
     embed.set_footer(text=f"Analyse basée sur {data_msg['total']} messages publics")
     await msg.edit(embed=embed)
     if show_mod_data:
@@ -925,7 +959,7 @@ async def send_help(channel):
             "• `supprime les 10 derniers messages de @pseudo`\n"
             "• `profil de @pseudo`\n\n"
             "**Fondateur uniquement :**\n"
-            "• `!give @membre coins:500`\n"
+            "• `!give @membre 500` ou `!give @membre coins:500`\n"
             "• `!give @membre role:NomDuRole`\n\n"
             "**Modérateurs uniquement :**\n"
             "• `!tradecancel @pseudo` — débloquer un trade figé"
@@ -999,8 +1033,8 @@ async def on_reaction_add(reaction, user):
 
         if choice_type == "banned_choice":
             if user.id != requester_id:
-                waiting_for_action_choice[msg_id] = (choice_type, member, action_data, requester_id)
                 return
+            waiting_for_action_choice.pop(msg_id, None)
             if str(reaction.emoji) == "✅":
                 action_data["action"] = "unban"
                 await send_confirmation(reaction.message.channel, action_data, requester_id)
@@ -1015,8 +1049,8 @@ async def on_reaction_add(reaction, user):
                 embed.add_field(
                     name="🛡️ Historique sanctions",
                     value=(
-                        f"⚠️ Warns total : {data['total_warns']}\n"
-                        f"🔇 Mutes : {data['mutes']} | 👢 Kicks : {data['kicks']} | 🔨 Bans : {data['bans']}"
+                        f"⚠️ Warns total : {data.get('total_warns', 0)}\n"
+                        f"🔇 Mutes : {data.get('mutes', 0)} | 👢 Kicks : {data.get('kicks', 0)} | 🔨 Bans : {data.get('bans', 0)}"
                     ),
                     inline=False
                 )
@@ -1047,7 +1081,8 @@ async def on_reaction_add(reaction, user):
                 await reaction.message.channel.send(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))
 
         elif choice_type == "comment_mgmt":
-            if not has_permission(user if isinstance(user, discord.Member) else reaction.message.guild.get_member(user.id)):
+            guild_member = reaction.message.guild.get_member(user.id)
+            if not guild_member or not has_permission(guild_member):
                 return
             waiting_for_action_choice.pop(msg_id)
             if str(reaction.emoji) == "➕":
@@ -1073,6 +1108,28 @@ async def on_reaction_add(reaction, user):
                     await cmsg.add_reaction(emojis_c[i])
                 waiting_for_comment[user.id] = (member.id, "remove_pick", cmsg.id)
                 waiting_for_action_choice[cmsg.id] = ("comment_remove_pick", member, None, user.id)
+
+        elif choice_type == "comment_remove_pick":
+            if user.id != requester_id:
+                return
+            emojis_c = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+            if str(reaction.emoji) in emojis_c:
+                idx = emojis_c.index(str(reaction.emoji))
+                db = load_db()
+                data = get_member_data(db, member.id)
+                comments = data.get("comments", [])
+                if idx < len(comments):
+                    removed = comments.pop(idx)
+                    save_db(db)
+                    waiting_for_action_choice.pop(msg_id, None)
+                    waiting_for_comment.pop(user.id, None)
+                    await reaction.message.channel.send(embed=discord.Embed(
+                        title="✅ Commentaire supprimé", color=0x2ecc71
+                    ))
+                    target_member = reaction.message.guild.get_member(member.id)
+                    await log_action(reaction.message.guild, "comment_remove",
+                                     reaction.message.guild.get_member(user.id),
+                                     target_member, extra={"Commentaire supprimé": removed})
         return
 
     if msg_id in waiting_for_member_choice:
@@ -1127,7 +1184,7 @@ async def on_message(message):
         member_message_days[mid] = {}
     member_message_days[mid][today] = member_message_days[mid].get(today, 0) + 1
 
-    # --- XP & pièces ---
+    # --- XP & pièces (utilise /data/db.json via db.py) ---
     from economy import add_xp_and_coins
     await add_xp_and_coins(message.author, message.guild, 10, 1)
 
@@ -1198,13 +1255,10 @@ async def on_message(message):
         ))
         return
 
-    # ✅ FIX PRINCIPAL — Commandes ! interceptées AVANT l'IA
-    # Évite de gaspiller le quota IA sur des commandes comme !give, !tradecancel, etc.
+    # Commandes ! interceptées AVANT l'IA
     if content.startswith("!"):
         if content_lower.startswith("!give"):
             await cmd_give(message, content[5:].strip())
-        # Les autres commandes ! (cogs, trades...) sont gérées par bot.process_commands()
-        # On retourne sans appeler l'IA
         return
 
     # --- Attente de commentaire ---
@@ -1239,7 +1293,7 @@ async def on_message(message):
         if spammed:
             return
 
-    # --- Analyse IA (modèle mis à jour) ---
+    # --- Analyse IA ---
     async with message.channel.typing():
         try:
             r = ai_client.chat.completions.create(
@@ -1258,7 +1312,6 @@ async def on_message(message):
             return
 
     if action_data.get("action") == "none":
-        # Pseudo seul tapé ? → chercher quand même
         target = action_data.get("target", "")
         if target:
             exact, similar, is_id, is_banned = await find_member(message.guild, target, message.channel)

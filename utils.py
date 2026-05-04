@@ -1,0 +1,231 @@
+import discord
+import asyncio
+from datetime import datetime, timezone, timedelta
+from openai import OpenAI
+
+from config import (
+    OPENROUTER_API_KEY, ALLOWED_ROLES, LOG_CHANNEL,
+    REASON_PROMPT, SPAM_THRESHOLD, SPAM_WINDOW,
+    BOOST_INTERVAL, BOOST_DURATION, BOOST_INACTIVE
+)
+from db import load_db, save_db, get_member_data
+
+ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
+
+spam_tracker = {}
+boost_tracker = {}
+
+# ============================================================
+# PERMISSIONS
+# ============================================================
+def has_permission(member):
+    if member.guild.owner_id == member.id:
+        return True
+    return any(role.name in ALLOWED_ROLES for role in member.roles)
+
+# ============================================================
+# RECHERCHE MEMBRES
+# ============================================================
+def similarity(a, b):
+    a, b = a.lower(), b.lower()
+    if a in b or b in a:
+        return 1.0
+    matches = sum(c in b for c in a)
+    return matches / max(len(a), len(b))
+
+def find_similar_members(guild, description):
+    description_lower = description.lower().strip()
+    exact, similar = [], []
+    for member in guild.members:
+        name_lower = member.display_name.lower()
+        username_lower = member.name.lower()
+        score = max(similarity(description_lower, name_lower), similarity(description_lower, username_lower))
+        if description_lower in [name_lower, username_lower]:
+            exact.append(member)
+        elif description_lower in name_lower or description_lower in username_lower or score >= 0.4:
+            similar.append((score, member))
+    similar.sort(key=lambda x: x[0], reverse=True)
+    return exact, [m for _, m in similar if m not in exact][:5]
+
+async def find_member(guild, description, channel):
+    if description.strip().isdigit():
+        uid = int(description.strip())
+        m = guild.get_member(uid)
+        if m:
+            return [m], [], True, False
+        try:
+            ban_entry = await guild.fetch_ban(discord.Object(id=uid))
+            return [ban_entry.user], [], True, True
+        except discord.NotFound:
+            pass
+        return [], [], True, False
+    if description.startswith("<@") and description.endswith(">"):
+        uid_str = description.strip("<@!>")
+        try:
+            uid = int(uid_str)
+            m = guild.get_member(uid)
+            if m:
+                return [m], [], True, False
+            ban_entry = await guild.fetch_ban(discord.Object(id=uid))
+            return [ban_entry.user], [], True, True
+        except:
+            return [], [], True, False
+    exact, similar = find_similar_members(guild, description)
+    return exact, similar, False, False
+
+# ============================================================
+# LOGS
+# ============================================================
+def get_log_channel(guild):
+    for ch in guild.text_channels:
+        if LOG_CHANNEL in ch.name or "logs" in ch.name.lower():
+            return ch
+    return None
+
+def get_channel_by_name(guild, name):
+    for ch in guild.text_channels:
+        if name.lower().replace("・", "") in ch.name.lower().replace("・", ""):
+            return ch
+    return None
+
+async def log_action(guild, action, moderator, target, reason=None, extra=None):
+    log_ch = get_log_channel(guild)
+    if not log_ch:
+        return
+    colors = {
+        "ban": 0xe74c3c, "kick": 0xe67e22, "mute": 0xf39c12,
+        "unmute": 0x2ecc71, "unban": 0x2ecc71, "warn": 0xf1c40f,
+        "spam_mute": 0xff6b35, "join": 0x2ecc71, "leave": 0x95a5a6,
+        "comment_add": 0x3498db, "comment_remove": 0xe74c3c,
+        "delete_messages": 0x9b59b6, "show_profile": 0x95a5a6,
+        "shop_buy": 0x2ecc71, "shop_equip": 0x3498db,
+        "gacha": 0xf1c40f, "daily": 0xf39c12,
+        "give_coins": 0xf1c40f, "give_role": 0x2ecc71,
+    }
+    labels = {
+        "ban": "🔨 Bannissement", "kick": "👢 Kick", "mute": "🔇 Mute",
+        "unmute": "🔊 Demute", "unban": "✅ Déban", "warn": "⚠️ Avertissement",
+        "spam_mute": "🤖 Mute anti-spam", "join": "📥 Arrivée", "leave": "📤 Départ",
+        "comment_add": "💬 Commentaire ajouté", "comment_remove": "🗑️ Commentaire supprimé",
+        "delete_messages": "🗑️ Messages supprimés", "show_profile": "🔍 Profil consulté",
+        "shop_buy": "🛍️ Achat boutique", "shop_equip": "👗 Équipement",
+        "gacha": "🎰 Gacha", "daily": "🎁 Daily",
+        "give_coins": "🪙 Give pièces", "give_role": "🎁 Give rôle",
+    }
+    embed = discord.Embed(
+        title=labels.get(action, action),
+        color=colors.get(action, 0x95a5a6),
+        timestamp=datetime.now(timezone.utc)
+    )
+    if target:
+        embed.set_thumbnail(url=target.display_avatar.url)
+        embed.add_field(name="Utilisateur", value=f"{target.mention} (`{target.id}`)", inline=True)
+    if moderator:
+        embed.add_field(name="Modérateur", value=f"{moderator.mention}", inline=True)
+    if reason:
+        embed.add_field(name="Raison", value=reason, inline=False)
+    if extra:
+        for k, v in extra.items():
+            if v is not None:
+                embed.add_field(name=k, value=str(v), inline=True)
+    await log_ch.send(embed=embed)
+
+# ============================================================
+# REFORMULATION IA
+# ============================================================
+async def reformulate_reason(raw_reason):
+    try:
+        r = ai_client.chat.completions.create(
+            model="openrouter/free",
+            messages=[{"role": "user", "content": f"{REASON_PROMPT}\n\nRaison brute : {raw_reason}"}]
+        )
+        return r.choices[0].message.content.strip()
+    except:
+        return raw_reason
+
+# ============================================================
+# BOOST
+# ============================================================
+def update_boost(member_id):
+    now = datetime.now(timezone.utc).timestamp()
+    tracker = boost_tracker.get(member_id, {"active": False, "last_msg": now, "start": now, "last_boost_msg": 0})
+    if now - tracker["last_msg"] > BOOST_INACTIVE:
+        tracker = {"active": False, "last_msg": now, "start": now, "last_boost_msg": 0}
+    tracker["last_msg"] = now
+    if not tracker["active"] and now - tracker.get("last_boost_msg", 0) >= BOOST_INTERVAL:
+        tracker["last_boost_msg"] = now
+        tracker["active"] = True
+        tracker["start"] = now
+    if tracker.get("active") and now - tracker["start"] > BOOST_DURATION:
+        tracker["active"] = False
+    boost_tracker[member_id] = tracker
+    return tracker.get("active", False)
+
+# ============================================================
+# ANTI-SPAM
+# ============================================================
+async def check_spam(message):
+    mid = message.author.id
+    content = message.content.strip().lower()
+    now = datetime.now(timezone.utc).timestamp()
+    if mid not in spam_tracker:
+        spam_tracker[mid] = {"content": content, "times": []}
+    tracker = spam_tracker[mid]
+    if tracker["content"] != content:
+        spam_tracker[mid] = {"content": content, "times": [now]}
+        return False
+    tracker["times"] = [t for t in tracker["times"] if now - t < SPAM_WINDOW]
+    tracker["times"].append(now)
+    if len(tracker["times"]) >= SPAM_THRESHOLD:
+        spam_tracker[mid] = {"content": "", "times": []}
+        await apply_spam_mute(message)
+        return True
+    return False
+
+async def apply_spam_mute(message):
+    member = message.author
+    guild = message.guild
+    db = load_db()
+    data = get_member_data(db, member.id)
+    count = data.get("spam_mute_count", 0)
+    data["spam_mute_count"] = count + 1
+    if count == 0:
+        duration = timedelta(minutes=15)
+        duration_txt = "15 minutes"
+    elif count == 1:
+        duration = timedelta(minutes=20)
+        duration_txt = "20 minutes"
+    else:
+        duration = None
+        duration_txt = "permanent"
+    data["warns"] = min(data["warns"] + 1, 3)
+    data["total_warns"] += 1
+    data["mutes"] += 1
+    data["sanctions"].append({
+        "type": "spam_mute",
+        "reason": "Spam répété (anti-spam automatique)",
+        "date": datetime.now(timezone.utc).isoformat(),
+        "duration": duration_txt
+    })
+    save_db(db)
+    try:
+        if duration:
+            await member.timeout(duration, reason="Spam répété (anti-spam automatique)")
+        else:
+            await member.timeout(timedelta(days=28), reason="Spam répété — mute permanent")
+    except discord.Forbidden:
+        pass
+    embed = discord.Embed(
+        title="🤖 Anti-spam déclenché",
+        description=f"{member.mention} a été mute **{duration_txt}** pour spam répété.\nAvertissements actuels : **{data['warns']}/3**",
+        color=0xff6b35
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    if duration is None:
+        ticket_ch = get_channel_by_name(guild, "ticket")
+        if ticket_ch:
+            embed.add_field(name="📩 Contestation", value=f"Tu peux ouvrir un ticket dans {ticket_ch.mention} même muté.", inline=False)
+    await message.channel.send(embed=embed)
+    await log_action(guild, "spam_mute", None, member,
+                     reason="Spam répété (anti-spam automatique)",
+                     extra={"Durée": duration_txt, "Warns": f"{data['warns']}/3"})

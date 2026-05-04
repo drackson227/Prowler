@@ -26,6 +26,38 @@ waiting_for_comment = {}
 mod_commands_log = []
 
 # ============================================================
+# DÉTECTION D'INTENTION (nouveau)
+# ============================================================
+async def is_moderation_command(message_content: str) -> bool:
+    """
+    Vérifie via l'IA si le message est vraiment une commande de modération.
+    Retourne True si c'est une commande, False si c'est une conversation normale.
+    """
+    try:
+        response = ai_client.chat.completions.create(
+            model="google/gemma-3-4b-it:free",
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Tu analyses des messages dans un salon de modération Discord.\n"
+                    "Est-ce que ce message est une commande de modération ?\n"
+                    "Les commandes valides incluent : ban, kick, mute, warn, unmute, unban, "
+                    "supprimer des messages, voir le profil d'un membre, chercher un membre.\n"
+                    "Un simple commentaire, une opinion, une phrase sans action claire = PAS une commande.\n"
+                    "Réponds UNIQUEMENT par OUI ou NON, rien d'autre.\n"
+                    f"Message : \"{message_content}\""
+                )
+            }],
+            max_tokens=5
+        )
+        answer = response.choices[0].message.content.strip().upper()
+        return "OUI" in answer
+    except Exception:
+        # En cas d'erreur IA, on laisse passer pour ne pas bloquer la modération
+        return True
+
+
+# ============================================================
 # PROFIL
 # ============================================================
 async def show_profile(channel, member, guild, show_mod_data=True):

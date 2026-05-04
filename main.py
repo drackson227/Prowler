@@ -14,6 +14,7 @@ DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
 ALLOWED_ROLES = ["Modérateur"]
+FOUNDER_ROLES = ["Fondateur"]
 MOD_CHANNEL = "modération"
 LOG_CHANNEL = "📋・logs"
 GENERAL_CHANNEL = "💬・chat-général"
@@ -28,6 +29,9 @@ INACTIVE_DAYS_REQUIRED = 2
 
 SPAM_THRESHOLD = 10
 SPAM_WINDOW = 30
+
+# ✅ MODÈLE IA — changé car google/gemma-3-4b-it:free avait son quota épuisé
+AI_MODEL = "mistralai/mistral-7b-instruct:free"
 # ============================================================
 
 ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
@@ -135,6 +139,11 @@ def has_permission(member):
         return True
     return any(role.name in ALLOWED_ROLES for role in member.roles)
 
+def is_founder(member):
+    if member.guild.owner_id == member.id:
+        return True
+    return any(role.name in FOUNDER_ROLES for role in member.roles)
+
 def similarity(a, b):
     a, b = a.lower(), b.lower()
     if a in b or b in a:
@@ -185,7 +194,7 @@ async def find_member(guild, description, channel):
 async def reformulate_reason(raw_reason):
     try:
         r = ai_client.chat.completions.create(
-            model="google/gemma-3-4b-it:free",
+            model=AI_MODEL,
             messages=[{"role": "user", "content": f"{REASON_PROMPT}\n\nRaison brute : {raw_reason}"}]
         )
         return r.choices[0].message.content.strip()
@@ -219,6 +228,7 @@ async def log_action(guild, action, moderator, target, reason=None, extra=None):
         "delete_messages": 0x9b59b6, "show_profile": 0x95a5a6,
         "shop_buy": 0x2ecc71, "shop_equip": 0x3498db,
         "gacha": 0xf1c40f, "daily": 0xf39c12,
+        "give_coins": 0xf1c40f, "give_role": 0x2ecc71,
     }
     labels = {
         "ban": "🔨 Bannissement", "kick": "👢 Kick", "mute": "🔇 Mute",
@@ -228,6 +238,7 @@ async def log_action(guild, action, moderator, target, reason=None, extra=None):
         "delete_messages": "🗑️ Messages supprimés", "show_profile": "🔍 Profil consulté",
         "shop_buy": "🛍️ Achat boutique", "shop_equip": "👗 Équipement",
         "gacha": "🎰 Gacha", "daily": "🎁 Daily",
+        "give_coins": "🪙 Pièces données", "give_role": "🎁 Rôle donné",
     }
     embed = discord.Embed(
         title=labels.get(action, action),
@@ -319,6 +330,108 @@ async def apply_spam_mute(message):
     await log_action(guild, "spam_mute", None, member,
                      reason="Spam répété (anti-spam automatique)",
                      extra={"Durée": duration_txt, "Warns": f"{data['warns']}/3"})
+
+# ============================================================
+# GIVE (Fondateur)
+# ============================================================
+async def cmd_give(message, args):
+    if not is_founder(message.author):
+        await message.channel.send(embed=discord.Embed(
+            title="❌ Permission refusée",
+            description="Seul le **Fondateur** peut utiliser `!give`.",
+            color=0xe74c3c
+        ))
+        return
+
+    mentions = message.mentions
+    if not mentions or not args:
+        await message.channel.send(embed=discord.Embed(
+            title="❓ Usage de !give",
+            description=(
+                "**Pièces :**\n"
+                "`!give @membre 500` — donne 500 pièces\n"
+                "`!give @membre coins:500` — même chose\n\n"
+                "**Rôle :**\n"
+                "`!give @membre role:NomDuRole` — donne un rôle Discord\n\n"
+                "Exemples :\n"
+                "• `!give @Zertyx 1000000`\n"
+                "• `!give @Zertyx role:Rôle Gold`"
+            ),
+            color=0x3498db
+        ))
+        return
+
+    target = mentions[0]
+    clean = args
+    for m in message.mentions:
+        clean = clean.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
+    clean = clean.strip()
+
+    # Format: role:NomDuRole
+    if clean.lower().startswith("role:"):
+        role_name = clean[5:].strip()
+        role = discord.utils.get(message.guild.roles, name=role_name)
+        if not role:
+            await message.channel.send(f"❌ Rôle **{role_name}** introuvable sur le serveur.")
+            return
+        try:
+            await target.add_roles(role, reason=f"!give par {message.author.display_name}")
+            db = load_db()
+            data = get_member_data(db, target.id)
+            if not any(i.get("name", "") == role_name for i in data.get("inventory", [])):
+                data.setdefault("inventory", []).append({
+                    "id": role_name.lower().replace(" ", "_"),
+                    "name": role_name, "type": "role_color"
+                })
+                save_db(db)
+            embed = discord.Embed(
+                title="🎁 Rôle donné !",
+                description=f"Le rôle **{role_name}** a été attribué à {target.mention}",
+                color=role.color.value if role.color.value else 0x2ecc71
+            )
+            embed.set_thumbnail(url=target.display_avatar.url)
+            await message.channel.send(embed=embed)
+            await log_action(message.guild, "give_role", message.author, target, extra={"Rôle": role_name})
+        except discord.Forbidden:
+            await message.channel.send(f"❌ Je n'ai pas la permission d'attribuer le rôle **{role_name}**.")
+        return
+
+    # Format: coins:500 ou juste 500
+    if clean.lower().startswith("coins:"):
+        try:
+            amount = int(clean[6:].strip().split()[0])
+        except:
+            await message.channel.send("❌ Format invalide. Ex: `!give @membre coins:200`")
+            return
+    else:
+        parts = clean.split()
+        if parts and parts[0].lstrip("-").isdigit():
+            try:
+                amount = int(parts[0])
+            except:
+                await message.channel.send("❌ Montant invalide.")
+                return
+        else:
+            await message.channel.send("❌ Format invalide.\nEx: `!give @membre 500` • `!give @membre role:Rôle Gold`")
+            return
+
+    if amount <= 0:
+        await message.channel.send("❌ Le montant doit être supérieur à 0.")
+        return
+
+    db = load_db()
+    data = get_member_data(db, target.id)
+    data["coins"] = data.get("coins", 0) + amount
+    save_db(db)
+    embed = discord.Embed(
+        title="🪙 Pièces données !",
+        description=f"**{amount:,}** 🪙 ont été ajoutées au compte de {target.mention}\nNouveau solde : **{data['coins']:,}** 🪙",
+        color=0xf1c40f
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+    await message.channel.send(embed=embed)
+    await log_action(message.guild, "give_coins", message.author, target,
+                     extra={"Pièces": f"+{amount}", "Solde": data["coins"]})
 
 # ============================================================
 # EXECUTE ACTION
@@ -442,7 +555,7 @@ async def analyze_member_messages(guild, member):
         msgs_text = "\n".join([f"- {m.content}" for m in messages[:50] if m.content])
         try:
             r = ai_client.chat.completions.create(
-                model="google/gemma-3-4b-it:free",
+                model=AI_MODEL,
                 messages=[{"role": "user", "content": f"{ANALYSIS_PROMPT}\n\nMessages :\n{msgs_text}"}]
             )
             ai_analysis = r.choices[0].message.content.strip()
@@ -970,10 +1083,7 @@ async def on_reaction_add(reaction, user):
         if str(reaction.emoji) == "✅" and len(candidates) == 1:
             waiting_for_member_choice.pop(msg_id)
             action_data["resolved_member"] = candidates[0]
-            if action_data.get("action") == "show_profile":
-                await show_profile(reaction.message.channel, candidates[0], reaction.message.guild)
-            else:
-                await ask_action_choice(reaction.message.channel, candidates[0], action_data, requester_id)
+            await ask_action_choice(reaction.message.channel, candidates[0], action_data, requester_id)
             return
         if str(reaction.emoji) == "❌":
             waiting_for_member_choice.pop(msg_id)
@@ -984,10 +1094,7 @@ async def on_reaction_add(reaction, user):
             if idx < len(candidates):
                 waiting_for_member_choice.pop(msg_id)
                 action_data["resolved_member"] = candidates[idx]
-                if action_data.get("action") == "show_profile":
-                    await show_profile(reaction.message.channel, candidates[idx], reaction.message.guild)
-                else:
-                    await ask_action_choice(reaction.message.channel, candidates[idx], action_data, requester_id)
+                await ask_action_choice(reaction.message.channel, candidates[idx], action_data, requester_id)
         return
 
     if msg_id in pending_actions:
@@ -1077,7 +1184,9 @@ async def on_message(message):
         await cmd_daily(message)
         return
 
-    # --- Salon modération ---
+    # ============================================================
+    # SALON MODÉRATION
+    # ============================================================
     if "modération" not in channel_name and "moderation" not in channel_name:
         return
 
@@ -1087,6 +1196,15 @@ async def on_message(message):
             description="Tu n'as pas la permission d'utiliser le bot de modération.",
             color=0xe74c3c
         ))
+        return
+
+    # ✅ FIX PRINCIPAL — Commandes ! interceptées AVANT l'IA
+    # Évite de gaspiller le quota IA sur des commandes comme !give, !tradecancel, etc.
+    if content.startswith("!"):
+        if content_lower.startswith("!give"):
+            await cmd_give(message, content[5:].strip())
+        # Les autres commandes ! (cogs, trades...) sont gérées par bot.process_commands()
+        # On retourne sans appeler l'IA
         return
 
     # --- Attente de commentaire ---
@@ -1121,11 +1239,11 @@ async def on_message(message):
         if spammed:
             return
 
-    # --- Analyse IA ---
+    # --- Analyse IA (modèle mis à jour) ---
     async with message.channel.typing():
         try:
             r = ai_client.chat.completions.create(
-                model="google/gemma-3-4b-it:free",
+                model=AI_MODEL,
                 messages=[{"role": "user", "content": f"{SYSTEM_PROMPT}\n\nMessage du modérateur: {message.content}"}]
             )
             raw = r.choices[0].message.content.strip()
@@ -1140,7 +1258,17 @@ async def on_message(message):
             return
 
     if action_data.get("action") == "none":
+        # Pseudo seul tapé ? → chercher quand même
+        target = action_data.get("target", "")
+        if target:
+            exact, similar, is_id, is_banned = await find_member(message.guild, target, message.channel)
+            all_candidates = exact + similar
+            if all_candidates:
+                action_data["action"] = "show_profile"
+                action_data["resolved_member"] = all_candidates[0]
+                await ask_action_choice(message.channel, all_candidates[0], action_data, message.author.id)
         return
+
     if action_data.get("action") == "show_profile" and not action_data.get("target"):
         await message.channel.send("❓ De quel membre veux-tu voir le profil ?")
         return

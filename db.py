@@ -1,7 +1,7 @@
 import os
 import json
 
-DB_FILE = "db.json"
+DB_FILE = "/data/db.json"  # ← seul changement, était "db.json"
 
 def load_db():
     if os.path.exists(DB_FILE):
@@ -10,6 +10,7 @@ def load_db():
     return {}
 
 def save_db(db):
+    os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(db, f, ensure_ascii=False, indent=2)
 

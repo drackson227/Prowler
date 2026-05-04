@@ -33,16 +33,14 @@ from moderation import (
 
 ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 
-# ─── Bot (commands.Bot remplace discord.Client) ───────────────────
+# ─── Bot ──────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.reactions = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
-
-# Alias pour compatibilité avec le reste du code qui utilise "client"
-client = bot
+client = bot  # alias de compatibilité
 
 member_message_days = {}
 
@@ -56,6 +54,7 @@ def normalize_name(s):
 async def send_help(channel):
     channel_name = normalize_name(channel.name)
     embed = discord.Embed(color=0x3498db, timestamp=datetime.now(timezone.utc))
+
     if "jeux" in channel_name:
         embed.title = "📖 Commandes — 🎮・jeux"
         embed.description = (
@@ -72,6 +71,7 @@ async def send_help(channel):
             "💡 Boutique → 🛍️・boutique\n"
             "🎁 Récompense quotidienne → 🎁・daily"
         )
+
     elif "boutique" in channel_name:
         embed.title = "📖 Commandes — 🛍️・boutique"
         embed.description = (
@@ -81,9 +81,11 @@ async def send_help(channel):
             "`!équiper [nom]` — équiper un rôle cosmétique\n"
             "`!spin` — tenter le gacha rôles (50 🪙)\n\n"
             "**Cartes**\n"
-            "`!cardspin` — tenter le gacha cartes (100 🪙)\n\n"
+            "`!cardspin` — tenter le gacha cartes (100 🪙)\n"
+            "`!cartesinfo` — voir les probabilités\n\n"
             "💡 La boutique rotative se renouvelle toutes les **3h**"
         )
+
     elif "daily" in channel_name:
         embed.title = "📖 Commandes — 🎁・daily"
         embed.description = (
@@ -93,24 +95,72 @@ async def send_help(channel):
             "💰 **Récompense de base :** 50 🪙 + 20 XP\n"
             "⚠️ Si tu rates un jour, ton streak repart à **0** !"
         )
+
+    elif "trade" in channel_name:
+        embed.title = "📖 Commandes — 🔄・trades"
+        embed.description = (
+            "**Échanges interactifs**\n"
+            "`!trade @pseudo` — lancer un trade interactif\n"
+            "`!trade @pseudo give [carte] contre [carte]` — trade direct\n\n"
+            "**Dons**\n"
+            "`!donner @pseudo [montant]` — donner des pièces\n\n"
+            "**Modérateurs uniquement**\n"
+            "`!tradecancel @pseudo` — débloquer un trade figé\n\n"
+            "💡 Réagis avec ✅ pour accepter, ❌ pour refuser un trade."
+        )
+
     elif "moderation" in channel_name or "modération" in channel_name:
         embed.title = "📖 Commandes — Modération"
         embed.description = (
             "Tu peux écrire en **langage naturel** :\n\n"
-            "• `mute @pseudo 30 minutes`\n• `ban @pseudo`\n• `kick @pseudo`\n"
-            "• `warn @pseudo`\n• `unmute @pseudo`\n• `unban @pseudo`\n"
+            "• `mute @pseudo 30 minutes`\n"
+            "• `ban @pseudo`\n"
+            "• `kick @pseudo`\n"
+            "• `warn @pseudo`\n"
+            "• `unmute @pseudo`\n"
+            "• `unban @pseudo`\n"
             "• `supprime les 10 derniers messages de @pseudo`\n"
-            "• `profil de @pseudo`"
+            "• `profil de @pseudo`\n\n"
+            "**Fondateur uniquement :**\n"
+            "• `!give @membre coins:500`\n"
+            "• `!give @membre role:NomDuRole`"
         )
+
+    elif "log" in channel_name:
+        embed.title = "📖 Lecture des logs"
+        embed.description = (
+            "Les logs enregistrent automatiquement :\n\n"
+            "🔨 Bans • 👢 Kicks • 🔇 Mutes • ⚠️ Warns\n"
+            "🔊 Demutes • ✅ Débans • 📥 Arrivées • 📤 Départs\n"
+            "💬 Commentaires modos • 🤖 Mutes anti-spam\n"
+            "🛍️ Achats • 🎰 Gacha • 🎁 Daily • 👗 Équipements"
+        )
+
+    elif "voc" in channel_name or "vocal" in channel_name:
+        embed.title = "📖 Commandes — 🎙️ Vocaux"
+        embed.description = (
+            "`!createvoc NomDuSalon` — créer un salon vocal temporaire\n\n"
+            "**Dans ton salon de commandes privé :**\n"
+            "`!vockick @membre` — expulser un membre\n"
+            "`!vocmute @membre` — muter un membre\n"
+            "`!vocunmute @membre` — démuter un membre\n"
+            "`!voclock` — fermer le salon aux nouveaux\n"
+            "`!vocunlock` — rouvrir le salon\n"
+            "`!vocrename NouveauNom` — renommer le salon\n"
+            "`!vocsuppr` — supprimer le salon"
+        )
+
     else:
         embed.title = "📖 Aide — Prowler Bot"
         embed.description = (
             "**Salons disponibles :**\n\n"
-            "🎮・jeux — profil, classement, social\n"
+            "🎮・jeux — profil, classement, cartes, social\n"
             "🛍️・boutique — boutique, gacha, cartes\n"
-            "🎁・daily — récompense quotidienne\n\n"
+            "🎁・daily — récompense quotidienne\n"
+            "🔄・trades — échanges et dons\n\n"
             "Tape `?help` dans ces salons pour les commandes détaillées."
         )
+
     embed.set_footer(text="Prowler Bot")
     await channel.send(embed=embed)
 
@@ -147,8 +197,10 @@ async def send_daily_report(guild):
     embed.add_field(name=f"👢 Kicks ({len(kicks)})", value=fmt_list(kicks), inline=False)
     embed.add_field(name=f"🔇 Mutes ({len(mutes)})", value=fmt_list(mutes), inline=False)
     embed.add_field(name=f"⚠️ Warns ({len(warns)})", value=fmt_list(warns), inline=False)
-    today_cmds = [(t, mod, act, tgt) for t, mod, act, tgt in mod_commands_log
-                  if datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m-%d") == today]
+    today_cmds = [
+        (t, mod, act, tgt) for t, mod, act, tgt in mod_commands_log
+        if datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m-%d") == today
+    ]
     if today_cmds:
         cmd_counts = Counter(f"{mod} → {act}" for _, mod, act, _ in today_cmds)
         cmd_txt = "\n".join([f"• **{k}** × {v}" for k, v in cmd_counts.most_common(10)])
@@ -246,14 +298,13 @@ async def update_active_roles_loop():
 @bot.event
 async def on_ready():
     print(f"✅ Bot connecté en tant que {bot.user}")
-    # Chargement des cogs
+    # Chargement des cogs — les fichiers doivent s'appeler exactement cards.py, trades.py, voc.py
     for cog in ["trades", "cards", "voc"]:
         try:
             await bot.load_extension(cog)
             print(f"✅ Cog '{cog}' chargé")
         except Exception as e:
             print(f"❌ Erreur chargement cog '{cog}' : {e}")
-    # Lancement des loops
     bot.loop.create_task(daily_report_loop())
     bot.loop.create_task(update_active_roles_loop())
     bot.loop.create_task(shop_rotate_loop())
@@ -430,7 +481,7 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    # Laisse les commandes des cogs (trades, cards, voc) être traitées
+    # Les cogs (trades, cards, voc) traitent leurs commandes ici
     await bot.process_commands(message)
 
     from utils import check_spam
@@ -454,6 +505,7 @@ async def on_message(message):
         await send_help(message.channel)
         return
 
+    # ── Salon jeux ──
     if "jeux" in channel_name:
         if content_lower == "!profil": await cmd_profil(message); return
         if content_lower == "!inventaire": await cmd_inventaire(message); return
@@ -469,18 +521,26 @@ async def on_message(message):
             if daily_ch:
                 await message.channel.send(f"❌ La commande `!daily` est réservée à {daily_ch.mention} !")
             return
+        if content_lower in ["!trade", "!donner"] or content_lower.startswith("!trade "):
+            trades_ch = get_channel_by_name(message.guild, "trades")
+            if trades_ch:
+                await message.channel.send(f"❌ Cette commande est réservée à {trades_ch.mention} !")
+            return
 
+    # ── Salon boutique ──
     if "boutique" in channel_name:
         if content_lower == "!boutique": await cmd_boutique(message); return
         if content_lower.startswith("!acheter "): await cmd_acheter(message, content[9:].strip()); return
         if content_lower.startswith("!équiper "): await cmd_equiper(message, content[9:].strip()); return
         if content_lower == "!spin": await cmd_spin(message); return
-        # !cardspin et !collection sont gérés par le cog Cards
+        # !cardspin et !collection gérés par le cog Cards
 
+    # ── Daily ──
     if content_lower == "!daily":
         await cmd_daily(message)
         return
 
+    # ── Hors modération → stop ──
     if "moderation" not in channel_name:
         return
 

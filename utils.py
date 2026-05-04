@@ -229,3 +229,58 @@ async def apply_spam_mute(message):
     await log_action(guild, "spam_mute", None, member,
                      reason="Spam répété (anti-spam automatique)",
                      extra={"Durée": duration_txt, "Warns": f"{data['warns']}/3"})
+# ─────────────────────────────────────────────────────────────────
+# COLLE CE BLOC À LA FIN DE TON utils.py EXISTANT
+# ─────────────────────────────────────────────────────────────────
+
+from difflib import SequenceMatcher
+
+def similarite(a: str, b: str) -> float:
+    """Retourne un score de similarité entre 0 et 1."""
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+def trouver_carte_fuzzy(cartes: list, nom: str, seuil: float = 0.6):
+    """
+    Cherche une carte par nom avec tolérance aux fautes.
+    Retourne (index, carte, score) pour la meilleure correspondance.
+    Retourne (None, None, 0) si rien trouvé au-dessus du seuil.
+
+    Exemples :
+    - "kebab froi"   → "Kebab Froid"       ✅
+    - "pijon paris"  → "Pigeon de Paris"   ✅
+    - "glitch matix" → "Glitch Matrix"     ✅
+    - "lgbt doree"   → "Carte LGBT Dorée"  ✅
+    """
+    meilleur_idx = None
+    meilleure_carte = None
+    meilleur_score = 0
+
+    for i, c in enumerate(cartes):
+        score = similarite(nom, c["nom"])
+        if nom.lower() in c["nom"].lower():
+            score = max(score, 0.8)
+        if score > meilleur_score:
+            meilleur_score = score
+            meilleur_idx = i
+            meilleure_carte = c
+
+    if meilleur_score >= seuil:
+        return meilleur_idx, meilleure_carte, meilleur_score
+    return None, None, 0
+
+
+def top3_cartes_fuzzy(cartes: list, nom: str, seuil: float = 0.4):
+    """
+    Retourne les 3 meilleures correspondances au-dessus du seuil.
+    Utilisé pour proposer un choix quand plusieurs résultats sont proches.
+    """
+    scores = []
+    for i, c in enumerate(cartes):
+        score = similarite(nom, c["nom"])
+        if nom.lower() in c["nom"].lower():
+            score = max(score, 0.75)
+        if score >= seuil:
+            scores.append((i, c, score))
+
+    scores.sort(key=lambda x: x[2], reverse=True)
+    return scores[:3]

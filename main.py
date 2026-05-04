@@ -1,4 +1,5 @@
 import discord
+from discord.ext import commands
 import asyncio
 import json
 import unicodedata
@@ -32,12 +33,16 @@ from moderation import (
 
 ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 
+# ─── Bot (commands.Bot remplace discord.Client) ───────────────────
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.reactions = True
 
-client = discord.Client(intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+
+# Alias pour compatibilité avec le reste du code qui utilise "client"
+client = bot
 
 member_message_days = {}
 
@@ -58,6 +63,10 @@ async def send_help(channel):
             "`!profil` — voir ton niveau, pièces, rôles équipés\n"
             "`!inventaire` — voir tous tes rôles achetés\n"
             "`!classement` — top des membres les plus actifs\n\n"
+            "**Cartes**\n"
+            "`!collection` — voir ta collection de cartes\n"
+            "`!collection @pseudo` — voir la collection d'un autre\n"
+            "`!cartesinfo` — probabilités des raretés\n\n"
             "**Social**\n"
             "`!parrainer @pseudo` — parrainer un ami\n\n"
             "💡 Boutique → 🛍️・boutique\n"
@@ -70,7 +79,9 @@ async def send_help(channel):
             "`!boutique` — voir la boutique standard et rotative\n"
             "`!acheter [nom]` — acheter un article\n"
             "`!équiper [nom]` — équiper un rôle cosmétique\n"
-            "`!spin` — tenter le gacha (50 🪙)\n\n"
+            "`!spin` — tenter le gacha rôles (50 🪙)\n\n"
+            "**Cartes**\n"
+            "`!cardspin` — tenter le gacha cartes (100 🪙)\n\n"
             "💡 La boutique rotative se renouvelle toutes les **3h**"
         )
     elif "daily" in channel_name:
@@ -96,7 +107,7 @@ async def send_help(channel):
         embed.description = (
             "**Salons disponibles :**\n\n"
             "🎮・jeux — profil, classement, social\n"
-            "🛍️・boutique — boutique, gacha, achats\n"
+            "🛍️・boutique — boutique, gacha, cartes\n"
             "🎁・daily — récompense quotidienne\n\n"
             "Tape `?help` dans ces salons pour les commandes détaillées."
         )
@@ -151,22 +162,22 @@ async def send_daily_report(guild):
 # LOOPS
 # ============================================================
 async def daily_report_loop():
-    await client.wait_until_ready()
-    while not client.is_closed():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
         now = datetime.now(timezone.utc)
         next_run = now.replace(hour=REPORT_HOUR, minute=0, second=0, microsecond=0)
         if now >= next_run:
             next_run += timedelta(days=1)
         await asyncio.sleep((next_run - now).total_seconds())
-        for guild in client.guilds:
+        for guild in bot.guilds:
             await send_daily_report(guild)
 
 async def shop_rotate_loop():
-    await client.wait_until_ready()
+    await bot.wait_until_ready()
     shop = load_shop()
     if not shop["rotating"]:
         rotate_shop()
-    while not client.is_closed():
+    while not bot.is_closed():
         shop = load_shop()
         last = shop.get("last_rotate")
         if last:
@@ -180,7 +191,7 @@ async def shop_rotate_loop():
             from config import SHOP_ROTATE_INTERVAL
             await asyncio.sleep(SHOP_ROTATE_INTERVAL)
         new_items = rotate_shop()
-        for guild in client.guilds:
+        for guild in bot.guilds:
             boutique_ch = get_channel_by_name(guild, "boutique")
             if boutique_ch:
                 embed = discord.Embed(
@@ -192,10 +203,10 @@ async def shop_rotate_loop():
                 await boutique_ch.send(embed=embed)
 
 async def update_active_roles_loop():
-    await client.wait_until_ready()
-    while not client.is_closed():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
         await asyncio.sleep(3600)
-        for guild in client.guilds:
+        for guild in bot.guilds:
             role_actif = discord.utils.get(guild.roles, name=ROLE_MEMBRE_ACTIF)
             role_membre = discord.utils.get(guild.roles, name=ROLE_MEMBRE)
             if not role_actif or not role_membre:
@@ -232,14 +243,22 @@ async def update_active_roles_loop():
 # ============================================================
 # ÉVÉNEMENTS
 # ============================================================
-@client.event
+@bot.event
 async def on_ready():
-    print(f"✅ Bot connecté en tant que {client.user}")
-    client.loop.create_task(daily_report_loop())
-    client.loop.create_task(update_active_roles_loop())
-    client.loop.create_task(shop_rotate_loop())
+    print(f"✅ Bot connecté en tant que {bot.user}")
+    # Chargement des cogs
+    for cog in ["trades", "cards", "voc"]:
+        try:
+            await bot.load_extension(cog)
+            print(f"✅ Cog '{cog}' chargé")
+        except Exception as e:
+            print(f"❌ Erreur chargement cog '{cog}' : {e}")
+    # Lancement des loops
+    bot.loop.create_task(daily_report_loop())
+    bot.loop.create_task(update_active_roles_loop())
+    bot.loop.create_task(shop_rotate_loop())
 
-@client.event
+@bot.event
 async def on_member_join(member):
     guild = member.guild
     role = discord.utils.get(guild.roles, name=ROLE_MEMBRE)
@@ -253,11 +272,11 @@ async def on_member_join(member):
         await general.send(f"👋 Bienvenue sur le serveur, {member.mention} !")
     await log_action(guild, "join", None, member)
 
-@client.event
+@bot.event
 async def on_member_remove(member):
     await log_action(member.guild, "leave", None, member)
 
-@client.event
+@bot.event
 async def on_reaction_add(reaction, user):
     if user.bot:
         return
@@ -406,10 +425,13 @@ async def on_reaction_add(reaction, user):
             pending_actions.pop(msg_id)
             await reaction.message.channel.send(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))
 
-@client.event
+@bot.event
 async def on_message(message):
     if message.author.bot:
         return
+
+    # Laisse les commandes des cogs (trades, cards, voc) être traitées
+    await bot.process_commands(message)
 
     from utils import check_spam
     channel_name = normalize_name(message.channel.name)
@@ -437,7 +459,7 @@ async def on_message(message):
         if content_lower == "!inventaire": await cmd_inventaire(message); return
         if content_lower == "!classement": await cmd_classement(message); return
         if content_lower.startswith("!parrainer"): await cmd_parrainer(message, content[10:].strip()); return
-        if content_lower in ["!boutique", "!spin"] or content_lower.startswith(("!acheter", "!équiper")):
+        if content_lower in ["!boutique", "!spin", "!cardspin"] or content_lower.startswith(("!acheter", "!équiper")):
             boutique_ch = get_channel_by_name(message.guild, "boutique")
             if boutique_ch:
                 await message.channel.send(f"❌ Cette commande est réservée à {boutique_ch.mention} !")
@@ -453,6 +475,7 @@ async def on_message(message):
         if content_lower.startswith("!acheter "): await cmd_acheter(message, content[9:].strip()); return
         if content_lower.startswith("!équiper "): await cmd_equiper(message, content[9:].strip()); return
         if content_lower == "!spin": await cmd_spin(message); return
+        # !cardspin et !collection sont gérés par le cog Cards
 
     if content_lower == "!daily":
         await cmd_daily(message)
@@ -502,17 +525,13 @@ async def on_message(message):
         if spammed:
             return
 
-    # ── DÉTECTION D'INTENTION ──────────────────────────────────
-    # Si le modo n'attend pas de réponse en cours (raison, commentaire),
-    # on vérifie que le message est bien une commande avant de le traiter.
     already_waiting = (
         message.author.id in waiting_for_reason or
         message.author.id in waiting_for_comment
     )
     if not already_waiting:
         if not await is_moderation_command(content):
-            return  # "probablement noir" → ignoré silencieusement ✅
-    # ──────────────────────────────────────────────────────────────
+            return
 
     action_data = None
     try:
@@ -565,4 +584,4 @@ async def on_message(message):
     exact, similar, is_id, is_banned = await find_member(message.guild, action_data.get("target", ""), message.channel)
     await handle_member_resolution(message.channel, action_data, message.author.id, exact, similar, is_id, is_banned)
 
-client.run(DISCORD_TOKEN)
+bot.run(DISCORD_TOKEN)

@@ -5,7 +5,6 @@ from discord.ext import commands, tasks
 import asyncio
 
 CATEGORY_NAME = "🎙️ Salons Vocaux"
-VOC_COMMANDS = ["vockick", "vocmute", "vocunmute", "voclock", "vocunlock", "vocrename", "vocsuppr"]
 
 
 class VocManager(commands.Cog):
@@ -21,20 +20,6 @@ class VocManager(commands.Cog):
             if data["owner"] == member_id:
                 return ch_id, data
         return None, None
-
-    # ─── Vérif que la commande vient du salon texte privé ────────
-    def is_owner_text_channel(self, ctx):
-        _, data = self.get_owner_voc(ctx.author.id)
-        if not data:
-            return False
-        return ctx.channel.id == data["text_channel_id"]
-
-    # ─── Guard : commandes voc uniquement dans le salon privé ────
-    async def cog_before_invoke(self, ctx):
-        if ctx.command.name in VOC_COMMANDS:
-            if not self.is_owner_text_channel(ctx):
-                await ctx.send("❌ Cette commande n'est utilisable que dans ton salon de commandes privé.")
-                raise commands.CheckFailure()
 
     # ─── Suppression propre (voc + salon texte) ──────────────────
     async def _delete_voc(self, guild, voc_id):
@@ -52,6 +37,14 @@ class VocManager(commands.Cog):
                     await text_ch.delete()
                 except:
                     pass
+
+    # ─── Guard : doit avoir une voc active ───────────────────────
+    async def _check_has_voc(self, ctx):
+        voc_id, _ = self.get_owner_voc(ctx.author.id)
+        if not voc_id:
+            await ctx.send("❌ Tu n'as pas de salon vocal actif. Crée-en un avec `!createvoc NomDuSalon`.")
+            return False
+        return True
 
     # ─── !createvoc ──────────────────────────────────────────────
     @commands.command(name="createvoc")
@@ -111,27 +104,30 @@ class VocManager(commands.Cog):
             "text_channel_id": text_ch.id
         }
 
-        # Message de bienvenue dans le salon privé
+        # Help dans le salon privé
         embed = discord.Embed(
             title=f"🎙️ Ton salon vocal — {voc_name}",
-            description="Seul toi vois ce salon. Utilise les commandes ci-dessous pour gérer ton vocal.",
+            description=(
+                "Seul toi vois ce salon. Tu peux utiliser ces commandes **depuis n'importe quel salon** du serveur.\n\n"
+                "**Commandes disponibles :**\n"
+                "`!vockick @membre` — Expulser un membre\n"
+                "`!vocmute @membre` — Muter un membre\n"
+                "`!vocunmute @membre` — Démuter un membre\n"
+                "`!voclock` — Fermer le salon aux nouveaux\n"
+                "`!vocunlock` — Rouvrir le salon\n"
+                "`!vocrename NouveauNom` — Renommer le salon\n"
+                "`!vocsuppr` — Supprimer le salon\n\n"
+                "💡 Tape `?help` ici pour revoir ces commandes."
+            ),
             color=0x5865F2
         )
-        embed.add_field(name="Commandes disponibles", value=(
-            "`!vockick @membre` — Expulser un membre\n"
-            "`!vocmute @membre` — Muter un membre\n"
-            "`!vocunmute @membre` — Démuter un membre\n"
-            "`!voclock` — Fermer le salon aux nouveaux\n"
-            "`!vocunlock` — Rouvrir le salon\n"
-            "`!vocrename NouveauNom` — Renommer le salon\n"
-            "`!vocsuppr` — Supprimer le salon"
-        ), inline=False)
         embed.set_footer(text="Ce salon sera supprimé automatiquement avec ton vocal.")
         await text_ch.send(ctx.author.mention, embed=embed)
 
         await ctx.send(
             f"✅ Salon **{voc_name}** créé ! "
-            f"Gère-le dans {text_ch.mention} (visible que par toi)."
+            f"Gère-le avec `!vockick`, `!vocmute`, etc. depuis n'importe quel salon. "
+            f"Ton salon privé : {text_ch.mention}"
         )
 
         # Suppression si personne ne rejoint en 30s
@@ -144,9 +140,11 @@ class VocManager(commands.Cog):
             except:
                 pass
 
-    # ─── Commandes de gestion ────────────────────────────────────
+    # ─── Commandes de gestion (utilisables depuis n'importe quel salon) ──
     @commands.command(name="vockick")
     async def voc_kick(self, ctx, member: discord.Member):
+        if not await self._check_has_voc(ctx):
+            return
         voc_id, _ = self.get_owner_voc(ctx.author.id)
         voc = ctx.guild.get_channel(voc_id)
         if not voc or member not in voc.members:
@@ -156,38 +154,42 @@ class VocManager(commands.Cog):
 
     @commands.command(name="vocmute")
     async def voc_mute(self, ctx, member: discord.Member):
+        if not await self._check_has_voc(ctx):
+            return
         await member.edit(mute=True)
         await ctx.send(f"🔇 **{member.display_name}** muté.")
 
     @commands.command(name="vocunmute")
     async def voc_unmute(self, ctx, member: discord.Member):
+        if not await self._check_has_voc(ctx):
+            return
         await member.edit(mute=False)
         await ctx.send(f"🔊 **{member.display_name}** démuté.")
 
     @commands.command(name="voclock")
     async def voc_lock(self, ctx):
+        if not await self._check_has_voc(ctx):
+            return
         voc_id, _ = self.get_owner_voc(ctx.author.id)
         voc = ctx.guild.get_channel(voc_id)
-        if not voc:
-            return await ctx.send("❌ Salon introuvable.")
         await voc.set_permissions(ctx.guild.default_role, connect=False)
         await ctx.send(f"🔒 **{voc.name}** verrouillé — plus personne ne peut rejoindre.")
 
     @commands.command(name="vocunlock")
     async def voc_unlock(self, ctx):
+        if not await self._check_has_voc(ctx):
+            return
         voc_id, _ = self.get_owner_voc(ctx.author.id)
         voc = ctx.guild.get_channel(voc_id)
-        if not voc:
-            return await ctx.send("❌ Salon introuvable.")
         await voc.set_permissions(ctx.guild.default_role, connect=True)
         await ctx.send(f"🔓 **{voc.name}** déverrouillé.")
 
     @commands.command(name="vocrename")
     async def voc_rename(self, ctx, *, nouveau_nom: str):
+        if not await self._check_has_voc(ctx):
+            return
         voc_id, _ = self.get_owner_voc(ctx.author.id)
         voc = ctx.guild.get_channel(voc_id)
-        if not voc:
-            return await ctx.send("❌ Salon introuvable.")
         await voc.edit(name=f"🔊 {nouveau_nom}")
         await ctx.send(f"✏️ Salon renommé en **{nouveau_nom}**.")
 
@@ -201,7 +203,7 @@ class VocManager(commands.Cog):
         await self._delete_voc(ctx.guild, voc_id)
         await ctx.send(f"🗑️ **{name}** supprimé.")
 
-    # ─── Surveillance salons vides (30s de délai) ────────────────
+    # ─── Surveillance salons vides ────────────────────────────────
     @tasks.loop(seconds=10)
     async def check_empty_vocs(self):
         now = asyncio.get_event_loop().time()

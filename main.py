@@ -37,7 +37,7 @@ intents.message_content = True
 intents.members = True
 intents.reactions = True
 
-client = discord.Client(intents=intents)
+client = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 member_message_days = {}
 

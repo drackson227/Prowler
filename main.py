@@ -280,7 +280,7 @@ async def update_active_roles_loop():
 @bot.event
 async def on_ready():
     print(f"✅ Bot connecté en tant que {bot.user}")
-    for cog in ["voc", "cards", "trades"]:
+    for cog in ["voc", "cards", "trades", "tickets"]:
         try:
             await bot.load_extension(cog)
             print(f"✅ Cog '{cog}' chargé")

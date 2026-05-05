@@ -42,7 +42,7 @@ TICKET_CHANNEL = "tickets"          # salon d'accueil des tickets
 MOD_ROLES_FOR_TICKETS = ["Modérateur", "Fondateur"]
 
 # ── Partie 3 : Anti-raid ────────────────────────────────────
-RAID_JOIN_THRESHOLD = 5             # nb de joins en moins de RAID_WINDOW secondes
+RAID_JOIN_THRESHOLD = 10  # était 5, maintenant 10
 RAID_WINDOW = 60                    # secondes
 
 # ── Partie 3 : Alertes activité ─────────────────────────────

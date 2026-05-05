@@ -95,6 +95,7 @@ async def log_action(guild, action, moderator, target, reason=None, extra=None):
     "give_coins": 0xf1c40f, "give_role": 0x2ecc71,
     "ticket_open": 0x3498db,   # ← AJOUTE ÇA
     "ticket_close": 0x95a5a6,  # ← AJOUTE ÇA
+    "give_carte": 0x5865F2,
 }
     labels = {
     "ban": "🔨 Bannissement", "kick": "👢 Kick", "mute": "🔇 Mute",
@@ -107,6 +108,7 @@ async def log_action(guild, action, moderator, target, reason=None, extra=None):
     "give_coins": "🪙 Pièces données", "give_role": "🎁 Rôle donné",
     "ticket_open": "🎫 Ticket ouvert",   # ← AJOUTE ÇA
     "ticket_close": "🔒 Ticket fermé",   # ← AJOUTE ÇA
+    "give_carte": "🎴 Carte donnée",
 }
     embed = discord.Embed(
         title=labels.get(action, action),

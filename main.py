@@ -119,19 +119,24 @@ async def send_help(channel):
             + VOC_SECTION
         )
     elif "moderation" in channel_name or "modération" in channel_name:
-        embed.title = "📖 Commandes — Modération"
-        embed.description = (
-            "Tu peux écrire en **langage naturel** :\n\n"
-            "• `mute @pseudo 30 minutes`\n• `ban @pseudo`\n• `kick @pseudo`\n"
-            "• `warn @pseudo`\n• `unmute @pseudo`\n• `unban @pseudo`\n"
-            "• `supprime les 10 derniers messages de @pseudo`\n"
-            "• `profil de @pseudo`\n\n"
-            "**Fondateur uniquement :**\n"
-            "• `!give @membre 500` ou `!give @membre coins:500`\n"
-            "• `!give @membre role:NomDuRole`\n\n"
-            "**Modérateurs uniquement :**\n"
-            "• `!tradecancel @pseudo` — débloquer un trade figé"
-        )
+    embed.title = "📖 Commandes — Modération"
+    embed.description = (
+        "Tu peux écrire en **langage naturel** :\n\n"
+        "• `mute @pseudo 30 minutes`\n• `ban @pseudo`\n• `kick @pseudo`\n"
+        "• `warn @pseudo`\n• `unmute @pseudo`\n• `unban @pseudo`\n"
+        "• `supprime les 10 derniers messages de @pseudo`\n"
+        "• `profil de @pseudo`\n\n"
+        "**Fondateur uniquement :**\n"
+        "• `!give @membre 500` ou `!give @membre coins:500`\n"
+        "• `!give @membre role:NomDuRole`\n\n"
+        "**Modérateurs uniquement :**\n"
+        "• `!tradecancel @pseudo` — débloquer un trade figé\n\n"
+        "**Setup & Gestion :**\n"
+        "• `!setup tickets` — créer le système de tickets\n"
+        "• `!setup antiraid` — activer la protection anti-raid\n"
+        "• `!setup bienvenue` — configurer les messages de bienvenue\n"
+        "• `!unlockserver` — déverrouiller le serveur après un raid"
+    )
     elif "log" in channel_name:
         embed.title = "📖 Lecture des logs"
         embed.description = (

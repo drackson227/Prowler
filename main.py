@@ -89,7 +89,7 @@ async def send_help(channel):
             "`!boutique` — voir la boutique standard et rotative\n"
             "`!acheter [nom]` — acheter un article\n"
             "`!équiper [nom]` — équiper un rôle cosmétique\n"
-            "`!spin` — tenter le gacha rôles (50 🪙)\n\n"
+            "`!rolespin` — tenter le gacha rôles (50 🪙)\n\n"
             "**Cartes**\n"
             "`!cardspin` — tenter le gacha cartes (100 🪙)\n"
             "`!cartesinfo` — voir les probabilités\n\n"

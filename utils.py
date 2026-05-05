@@ -1,12 +1,13 @@
 import discord
 import asyncio
 from datetime import datetime, timezone, timedelta
+from difflib import SequenceMatcher
 from openai import OpenAI
 
 from config import (
     OPENROUTER_API_KEY, ALLOWED_ROLES, LOG_CHANNEL,
     REASON_PROMPT, SPAM_THRESHOLD, SPAM_WINDOW,
-    BOOST_INTERVAL, BOOST_DURATION, BOOST_INACTIVE
+    BOOST_INTERVAL, BOOST_DURATION, BOOST_INACTIVE, AI_MODEL
 )
 from db import load_db, save_db, get_member_data
 
@@ -15,17 +16,11 @@ ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_A
 spam_tracker = {}
 boost_tracker = {}
 
-# ============================================================
-# PERMISSIONS
-# ============================================================
 def has_permission(member):
     if member.guild.owner_id == member.id:
         return True
     return any(role.name in ALLOWED_ROLES for role in member.roles)
 
-# ============================================================
-# RECHERCHE MEMBRES
-# ============================================================
 def similarity(a, b):
     a, b = a.lower(), b.lower()
     if a in b or b in a:
@@ -73,9 +68,6 @@ async def find_member(guild, description, channel):
     exact, similar = find_similar_members(guild, description)
     return exact, similar, False, False
 
-# ============================================================
-# LOGS
-# ============================================================
 def get_log_channel(guild):
     for ch in guild.text_channels:
         if LOG_CHANNEL in ch.name or "logs" in ch.name.lower():
@@ -110,7 +102,7 @@ async def log_action(guild, action, moderator, target, reason=None, extra=None):
         "delete_messages": "🗑️ Messages supprimés", "show_profile": "🔍 Profil consulté",
         "shop_buy": "🛍️ Achat boutique", "shop_equip": "👗 Équipement",
         "gacha": "🎰 Gacha", "daily": "🎁 Daily",
-        "give_coins": "🪙 Give pièces", "give_role": "🎁 Give rôle",
+        "give_coins": "🪙 Pièces données", "give_role": "🎁 Rôle donné",
     }
     embed = discord.Embed(
         title=labels.get(action, action),
@@ -130,22 +122,16 @@ async def log_action(guild, action, moderator, target, reason=None, extra=None):
                 embed.add_field(name=k, value=str(v), inline=True)
     await log_ch.send(embed=embed)
 
-# ============================================================
-# REFORMULATION IA
-# ============================================================
 async def reformulate_reason(raw_reason):
     try:
         r = ai_client.chat.completions.create(
-            model="openrouter/free",
+            model=AI_MODEL,
             messages=[{"role": "user", "content": f"{REASON_PROMPT}\n\nRaison brute : {raw_reason}"}]
         )
         return r.choices[0].message.content.strip()
     except:
         return raw_reason
 
-# ============================================================
-# BOOST
-# ============================================================
 def update_boost(member_id):
     now = datetime.now(timezone.utc).timestamp()
     tracker = boost_tracker.get(member_id, {"active": False, "last_msg": now, "start": now, "last_boost_msg": 0})
@@ -161,9 +147,6 @@ def update_boost(member_id):
     boost_tracker[member_id] = tracker
     return tracker.get("active", False)
 
-# ============================================================
-# ANTI-SPAM
-# ============================================================
 async def check_spam(message):
     mid = message.author.id
     content = message.content.strip().lower()
@@ -224,63 +207,26 @@ async def apply_spam_mute(message):
     if duration is None:
         ticket_ch = get_channel_by_name(guild, "ticket")
         if ticket_ch:
-            embed.add_field(name="📩 Contestation", value=f"Tu peux ouvrir un ticket dans {ticket_ch.mention} même muté.", inline=False)
+            embed.add_field(name="📩 Contestation", value=f"Tu peux ouvrir un ticket dans {ticket_ch.mention}.", inline=False)
     await message.channel.send(embed=embed)
     await log_action(guild, "spam_mute", None, member,
                      reason="Spam répété (anti-spam automatique)",
                      extra={"Durée": duration_txt, "Warns": f"{data['warns']}/3"})
-# ─────────────────────────────────────────────────────────────────
-# COLLE CE BLOC À LA FIN DE TON utils.py EXISTANT
-# ─────────────────────────────────────────────────────────────────
 
-from difflib import SequenceMatcher
-
-def similarite(a: str, b: str) -> float:
-    """Retourne un score de similarité entre 0 et 1."""
+# Fuzzy pour cartes
+def similarite_cartes(a: str, b: str) -> float:
     return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
 def trouver_carte_fuzzy(cartes: list, nom: str, seuil: float = 0.6):
-    """
-    Cherche une carte par nom avec tolérance aux fautes.
-    Retourne (index, carte, score) pour la meilleure correspondance.
-    Retourne (None, None, 0) si rien trouvé au-dessus du seuil.
-
-    Exemples :
-    - "kebab froi"   → "Kebab Froid"       ✅
-    - "pijon paris"  → "Pigeon de Paris"   ✅
-    - "glitch matix" → "Glitch Matrix"     ✅
-    - "lgbt doree"   → "Carte LGBT Dorée"  ✅
-    """
-    meilleur_idx = None
-    meilleure_carte = None
-    meilleur_score = 0
-
+    meilleur_idx, meilleure_carte, meilleur_score = None, None, 0
     for i, c in enumerate(cartes):
-        score = similarite(nom, c["nom"])
+        score = similarite_cartes(nom, c["nom"])
         if nom.lower() in c["nom"].lower():
             score = max(score, 0.8)
         if score > meilleur_score:
             meilleur_score = score
             meilleur_idx = i
             meilleure_carte = c
-
     if meilleur_score >= seuil:
         return meilleur_idx, meilleure_carte, meilleur_score
     return None, None, 0
-
-
-def top3_cartes_fuzzy(cartes: list, nom: str, seuil: float = 0.4):
-    """
-    Retourne les 3 meilleures correspondances au-dessus du seuil.
-    Utilisé pour proposer un choix quand plusieurs résultats sont proches.
-    """
-    scores = []
-    for i, c in enumerate(cartes):
-        score = similarite(nom, c["nom"])
-        if nom.lower() in c["nom"].lower():
-            score = max(score, 0.75)
-        if score >= seuil:
-            scores.append((i, c, score))
-
-    scores.sort(key=lambda x: x[2], reverse=True)
-    return scores[:3]

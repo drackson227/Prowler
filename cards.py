@@ -1,10 +1,9 @@
-# cards.py — Système de cartes à collectionner
-
 import discord
 from discord.ext import commands
 import random
 import asyncio
 from db import load_db, save_db, get_member_data
+from economy import spinning_actifs
 
 RARETES = {
     "shlag":      {"emoji": "⚫", "couleur": 0x2C2C2C, "prob": 30.0, "label": "Shlag"},
@@ -62,7 +61,6 @@ class Cards(commands.Cog):
 
     @commands.command(name="cardspin")
     async def cardspin(self, ctx):
-        # Vérification salon — corrigé
         channel_name = ctx.channel.name.lower().replace("・", "")
         if SALON_BOUTIQUE not in channel_name:
             boutique = next(
@@ -72,64 +70,70 @@ class Cards(commands.Cog):
             mention = boutique.mention if boutique else "`🛍️・boutique`"
             return await ctx.send(f"❌ La commande `!cardspin` n'est utilisable que dans {mention}.")
 
-        db = load_db()
-        membre = get_member_data(db, ctx.author.id)
+        # Anti-respin
+        if ctx.author.id in spinning_actifs:
+            return await ctx.send("⏳ Ton spin est encore en cours, attends la fin !")
+        spinning_actifs.add(ctx.author.id)
 
-        if membre.get("coins", 0) < PRIX_SPIN:
-            return await ctx.send(
-                f"❌ Il te faut **{PRIX_SPIN} pièces** pour spinner. "
-                f"Tu en as **{membre.get('coins', 0)}**."
+        try:
+            db = load_db()
+            membre = get_member_data(db, ctx.author.id)
+            if membre.get("coins", 0) < PRIX_SPIN:
+                return await ctx.send(
+                    f"❌ Il te faut **{PRIX_SPIN} pièces** pour spinner. "
+                    f"Tu en as **{membre.get('coins', 0)}**."
+                )
+
+            membre["coins"] -= PRIX_SPIN
+            save_db(db)
+
+            embed_anim = discord.Embed(
+                title="🎴 Card Spin — En cours...",
+                description=build_frame_animation(0),
+                color=0x5865F2
             )
+            embed_anim.set_footer(text=f"Coût : {PRIX_SPIN} pièces • Solde restant : {membre['coins']} pièces")
+            msg = await ctx.send(embed=embed_anim)
 
-        membre["coins"] -= PRIX_SPIN
-        save_db(db)
+            for i in range(1, 5):
+                await asyncio.sleep(0.8)
+                embed_anim.description = build_frame_animation(i)
+                await msg.edit(embed=embed_anim)
 
-        embed_anim = discord.Embed(
-            title="🎴 Card Spin — En cours...",
-            description=build_frame_animation(0),
-            color=0x5865F2
-        )
-        embed_anim.set_footer(text=f"Coût : {PRIX_SPIN} pièces • Solde restant : {membre['coins']} pièces")
-        msg = await ctx.send(embed=embed_anim)
+            carte = tirer_carte()
+            rarete_info = RARETES[carte["rarete"]]
 
-        for i in range(1, 5):
-            await asyncio.sleep(0.8)
-            embed_anim.description = build_frame_animation(i)
-            await msg.edit(embed=embed_anim)
+            db = load_db()
+            membre = get_member_data(db, ctx.author.id)
+            if "cartes" not in membre:
+                membre["cartes"] = []
 
-        carte = tirer_carte()
-        rarete_info = RARETES[carte["rarete"]]
+            doublon = any(c["id"] == carte["id"] for c in membre["cartes"])
+            membre["cartes"].append({
+                "id": carte["id"],
+                "nom": carte["nom"],
+                "rarete": carte["rarete"]
+            })
+            save_db(db)
 
-        db = load_db()
-        membre = get_member_data(db, ctx.author.id)
-        if "cartes" not in membre:
-            membre["cartes"] = []
-
-        doublon = any(c["id"] == carte["id"] for c in membre["cartes"])
-        membre["cartes"].append({
-            "id": carte["id"],
-            "nom": carte["nom"],
-            "rarete": carte["rarete"]
-        })
-        save_db(db)
-
-        embed_result = discord.Embed(
-            title=f"{rarete_info['emoji']} {carte['nom']}",
-            description=carte["description"],
-            color=rarete_info["couleur"]
-        )
-        embed_result.add_field(name="Rareté",      value=f"{rarete_info['emoji']} **{rarete_info['label']}**", inline=True)
-        embed_result.add_field(name="Probabilité", value=f"`{rarete_info['prob']}%`", inline=True)
-        if doublon:
-            embed_result.add_field(name="⚠️ Doublon", value="Tu possèdes déjà cette carte !", inline=False)
-        embed_result.set_image(url=carte["image_url"])
-        embed_result.set_footer(
-            text=f"{ctx.author.display_name} • Solde : {membre['coins']} pièces",
-            icon_url=ctx.author.display_avatar.url
-        )
-
-        await asyncio.sleep(0.5)
-        await msg.edit(embed=embed_result)
+            embed_result = discord.Embed(
+                title=f"{rarete_info['emoji']} {carte['nom']}",
+                description=carte["description"],
+                color=rarete_info["couleur"]
+            )
+            embed_result.add_field(name="Rareté", value=f"{rarete_info['emoji']} **{rarete_info['label']}**", inline=True)
+            embed_result.add_field(name="Probabilité", value=f"`{rarete_info['prob']}%`", inline=True)
+            if doublon:
+                embed_result.add_field(name="⚠️ Doublon", value="Tu possèdes déjà cette carte !", inline=False)
+            embed_result.set_image(url=carte["image_url"])
+            embed_result.set_footer(
+                text=f"{ctx.author.display_name} • Solde : {membre['coins']} pièces",
+                icon_url=ctx.author.display_avatar.url
+            )
+            await asyncio.sleep(0.5)
+            await msg.edit(embed=embed_result)
+        finally:
+            spinning_actifs.discard(ctx.author.id)
 
     @commands.command(name="collection")
     async def collection(self, ctx, member: discord.Member = None):
@@ -137,17 +141,14 @@ class Cards(commands.Cog):
         db = load_db()
         uid = str(target.id)
         cartes = db.get(uid, {}).get("cartes", [])
-
         if not cartes:
             return await ctx.send(f"📭 **{target.display_name}** n'a aucune carte pour l'instant.")
-
         ordre = list(RARETES.keys())
         cartes_triees = sorted(
             cartes,
             key=lambda c: ordre.index(c["rarete"]) if c["rarete"] in ordre else 99,
             reverse=True
         )
-
         lignes = []
         rarete_actuelle = None
         for c in cartes_triees:
@@ -157,10 +158,8 @@ class Cards(commands.Cog):
                 lignes.append(f"\n{info['emoji']} **{info['label']}**")
                 rarete_actuelle = r
             lignes.append(f" └ {c['nom']}")
-
         total = len(cartes)
         uniques = len({c["id"] for c in cartes})
-
         embed = discord.Embed(
             title=f"🃏 Collection de {target.display_name}",
             description="\n".join(lignes[:40]),
@@ -176,7 +175,6 @@ class Cards(commands.Cog):
         for key, info in RARETES.items():
             barre = "█" * int(info["prob"] / 2)
             lignes.append(f"{info['emoji']} **{info['label']}** — `{info['prob']}%` {barre}")
-
         embed = discord.Embed(
             title="🎴 Probabilités des raretés",
             description="\n".join(lignes),

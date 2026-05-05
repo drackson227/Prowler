@@ -25,8 +25,7 @@ def similarity(a, b):
     a, b = a.lower(), b.lower()
     if a in b or b in a:
         return 1.0
-    matches = sum(c in b for c in a)
-    return matches / max(len(a), len(b))
+    return SequenceMatcher(None, a, b).ratio()
 
 def find_similar_members(guild, description):
     description_lower = description.lower().strip()
@@ -43,8 +42,9 @@ def find_similar_members(guild, description):
     return exact, [m for _, m in similar if m not in exact][:5]
 
 async def find_member(guild, description, channel):
-    if description.strip().isdigit():
-        uid = int(description.strip())
+    description = description.strip()
+    if description.isdigit():
+        uid = int(description)
         m = guild.get_member(uid)
         if m:
             return [m], [], True, False
@@ -85,38 +85,41 @@ async def log_action(guild, action, moderator, target, reason=None, extra=None):
     if not log_ch:
         return
     colors = {
-    "ban": 0xe74c3c, "kick": 0xe67e22, "mute": 0xf39c12,
-    "unmute": 0x2ecc71, "unban": 0x2ecc71, "warn": 0xf1c40f,
-    "spam_mute": 0xff6b35, "join": 0x2ecc71, "leave": 0x95a5a6,
-    "comment_add": 0x3498db, "comment_remove": 0xe74c3c,
-    "delete_messages": 0x9b59b6, "show_profile": 0x95a5a6,
-    "shop_buy": 0x2ecc71, "shop_equip": 0x3498db,
-    "gacha": 0xf1c40f, "daily": 0xf39c12,
-    "give_coins": 0xf1c40f, "give_role": 0x2ecc71,
-    "ticket_open": 0x3498db,   # ← AJOUTE ÇA
-    "ticket_close": 0x95a5a6,  # ← AJOUTE ÇA
-    "give_carte": 0x5865F2,
-}
+        "ban": 0xe74c3c, "kick": 0xe67e22, "mute": 0xf39c12,
+        "unmute": 0x2ecc71, "unban": 0x2ecc71, "warn": 0xf1c40f,
+        "spam_mute": 0xff6b35, "join": 0x2ecc71, "leave": 0x95a5a6,
+        "comment_add": 0x3498db, "comment_remove": 0xe74c3c,
+        "delete_messages": 0x9b59b6, "show_profile": 0x95a5a6,
+        "shop_buy": 0x2ecc71, "shop_equip": 0x3498db,
+        "gacha": 0xf1c40f, "daily": 0xf39c12,
+        "give_coins": 0xf1c40f, "give_role": 0x2ecc71,
+        "give_carte": 0x5865F2, "ticket_open": 0x3498db,
+        "ticket_close": 0x95a5a6, "cardspin": 0xFF1493,
+        "trade": 0x5865F2, "donner_pieces": 0xf1c40f,
+    }
     labels = {
-    "ban": "🔨 Bannissement", "kick": "👢 Kick", "mute": "🔇 Mute",
-    "unmute": "🔊 Demute", "unban": "✅ Déban", "warn": "⚠️ Avertissement",
-    "spam_mute": "🤖 Mute anti-spam", "join": "📥 Arrivée", "leave": "📤 Départ",
-    "comment_add": "💬 Commentaire ajouté", "comment_remove": "🗑️ Commentaire supprimé",
-    "delete_messages": "🗑️ Messages supprimés", "show_profile": "🔍 Profil consulté",
-    "shop_buy": "🛍️ Achat boutique", "shop_equip": "👗 Équipement",
-    "gacha": "🎰 Gacha", "daily": "🎁 Daily",
-    "give_coins": "🪙 Pièces données", "give_role": "🎁 Rôle donné",
-    "ticket_open": "🎫 Ticket ouvert",   # ← AJOUTE ÇA
-    "ticket_close": "🔒 Ticket fermé",   # ← AJOUTE ÇA
-    "give_carte": "🎴 Carte donnée",
-}
+        "ban": "🔨 Bannissement", "kick": "👢 Kick", "mute": "🔇 Mute",
+        "unmute": "🔊 Demute", "unban": "✅ Déban", "warn": "⚠️ Avertissement",
+        "spam_mute": "🤖 Mute anti-spam", "join": "📥 Arrivée", "leave": "📤 Départ",
+        "comment_add": "💬 Commentaire ajouté", "comment_remove": "🗑️ Commentaire supprimé",
+        "delete_messages": "🗑️ Messages supprimés", "show_profile": "🔍 Profil consulté",
+        "shop_buy": "🛍️ Achat boutique", "shop_equip": "👗 Équipement",
+        "gacha": "🎰 Gacha", "daily": "🎁 Daily",
+        "give_coins": "🪙 Pièces données", "give_role": "🎁 Rôle donné",
+        "give_carte": "🎴 Carte donnée", "ticket_open": "🎫 Ticket ouvert",
+        "ticket_close": "🔒 Ticket fermé", "cardspin": "🎴 Card Spin",
+        "trade": "🔄 Trade effectué", "donner_pieces": "🪙 Don de pièces",
+    }
     embed = discord.Embed(
         title=labels.get(action, action),
         color=colors.get(action, 0x95a5a6),
         timestamp=datetime.now(timezone.utc)
     )
     if target:
-        embed.set_thumbnail(url=target.display_avatar.url)
+        try:
+            embed.set_thumbnail(url=target.display_avatar.url)
+        except:
+            pass
         embed.add_field(name="Utilisateur", value=f"{target.mention} (`{target.id}`)", inline=True)
     if moderator:
         embed.add_field(name="Modérateur", value=f"{moderator.mention}", inline=True)
@@ -199,27 +202,26 @@ async def apply_spam_mute(message):
     save_db(db)
     try:
         if duration:
-            await member.timeout(duration, reason="Spam répété (anti-spam automatique)")
+            await member.timeout(duration, reason="Spam répété")
         else:
-            await member.timeout(timedelta(days=28), reason="Spam répété — mute permanent")
+            await member.timeout(timedelta(days=28), reason="Spam répété — permanent")
     except discord.Forbidden:
         pass
     embed = discord.Embed(
         title="🤖 Anti-spam déclenché",
-        description=f"{member.mention} a été mute **{duration_txt}** pour spam répété.\nAvertissements actuels : **{data['warns']}/3**",
+        description=f"{member.mention} muté **{duration_txt}** pour spam.\nWarns : **{data['warns']}/3**",
         color=0xff6b35
     )
     embed.set_thumbnail(url=member.display_avatar.url)
     if duration is None:
         ticket_ch = get_channel_by_name(guild, "ticket")
         if ticket_ch:
-            embed.add_field(name="📩 Contestation", value=f"Tu peux ouvrir un ticket dans {ticket_ch.mention}.", inline=False)
+            embed.add_field(name="📩 Contestation", value=f"Ouvre un ticket dans {ticket_ch.mention}.", inline=False)
     await message.channel.send(embed=embed)
     await log_action(guild, "spam_mute", None, member,
-                     reason="Spam répété (anti-spam automatique)",
-                     extra={"Durée": duration_txt, "Warns": f"{data['warns']}/3"})
+                     reason="Spam répété", extra={"Durée": duration_txt, "Warns": f"{data['warns']}/3"})
 
-# Fuzzy pour cartes
+# Fuzzy pour cartes (utilisé dans trades.py et moderation.py)
 def similarite_cartes(a: str, b: str) -> float:
     return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 

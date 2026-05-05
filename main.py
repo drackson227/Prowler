@@ -546,7 +546,7 @@ async def on_message(message):
         if content_lower == "!inventaire": await cmd_inventaire(message); return
         if content_lower == "!classement": await cmd_classement(message); return
         if content_lower.startswith("!parrainer"): await cmd_parrainer(message, content[10:].strip()); return
-        if content_lower in ["!boutique", "!spin", "!cardspin"] or content_lower.startswith(("!acheter", "!équiper")):
+        if content_lower in ["!boutique", "!rolespin", "!cardspin"] or content_lower.startswith(("!acheter", "!équiper")):
             boutique_ch = get_channel_by_name(message.guild, "boutique")
             if boutique_ch:
                 await message.channel.send(f"❌ Cette commande est réservée à {boutique_ch.mention} !")

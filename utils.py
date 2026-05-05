@@ -97,15 +97,17 @@ async def log_action(guild, action, moderator, target, reason=None, extra=None):
     "ticket_close": 0x95a5a6,  # ← AJOUTE ÇA
 }
     labels = {
-        "ban": "🔨 Bannissement", "kick": "👢 Kick", "mute": "🔇 Mute",
-        "unmute": "🔊 Demute", "unban": "✅ Déban", "warn": "⚠️ Avertissement",
-        "spam_mute": "🤖 Mute anti-spam", "join": "📥 Arrivée", "leave": "📤 Départ",
-        "comment_add": "💬 Commentaire ajouté", "comment_remove": "🗑️ Commentaire supprimé",
-        "delete_messages": "🗑️ Messages supprimés", "show_profile": "🔍 Profil consulté",
-        "shop_buy": "🛍️ Achat boutique", "shop_equip": "👗 Équipement",
-        "gacha": "🎰 Gacha", "daily": "🎁 Daily",
-        "give_coins": "🪙 Pièces données", "give_role": "🎁 Rôle donné",
-    }
+    "ban": "🔨 Bannissement", "kick": "👢 Kick", "mute": "🔇 Mute",
+    "unmute": "🔊 Demute", "unban": "✅ Déban", "warn": "⚠️ Avertissement",
+    "spam_mute": "🤖 Mute anti-spam", "join": "📥 Arrivée", "leave": "📤 Départ",
+    "comment_add": "💬 Commentaire ajouté", "comment_remove": "🗑️ Commentaire supprimé",
+    "delete_messages": "🗑️ Messages supprimés", "show_profile": "🔍 Profil consulté",
+    "shop_buy": "🛍️ Achat boutique", "shop_equip": "👗 Équipement",
+    "gacha": "🎰 Gacha", "daily": "🎁 Daily",
+    "give_coins": "🪙 Pièces données", "give_role": "🎁 Rôle donné",
+    "ticket_open": "🎫 Ticket ouvert",   # ← AJOUTE ÇA
+    "ticket_close": "🔒 Ticket fermé",   # ← AJOUTE ÇA
+}
     embed = discord.Embed(
         title=labels.get(action, action),
         color=colors.get(action, 0x95a5a6),

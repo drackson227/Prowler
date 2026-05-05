@@ -244,7 +244,7 @@ async def cmd_boutique(message):
             rotate_txt = ""
         rotating_text = "\n".join([f"• **{i['name']}** — {i['price']} 🪙" for i in shop["rotating"]])
         embed.add_field(name=f"🔄 Boutique rotative — {rotate_txt}", value=rotating_text, inline=False)
-    embed.set_footer(text="!acheter [nom] pour acheter • !spin pour le gacha (50 🪙) • !cardspin pour les cartes (100 🪙)")
+    embed.set_footer(text="!acheter [nom] pour acheter • !rolespin pour le gacha (50 🪙) • !cardspin pour les cartes (100 🪙)")
     await message.channel.send(embed=embed)
     gacha_items = shop.get("gacha", [])
     if gacha_items:

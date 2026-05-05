@@ -17,13 +17,7 @@ def save_db(db):
 def get_member_data(db, member_id):
     mid = str(member_id)
     if mid not in db:
-        db[mid] = {
-            "warns": 0, "total_warns": 0, "mutes": 0, "kicks": 0,
-            "bans": 0, "spam_mute_count": 0, "comments": [], "sanctions": [],
-            "xp": 0, "level": 0, "coins": 0, "inventory": [], "equipped": [],
-            "daily_streak": 0, "last_daily": None, "godfather": None,
-            "subscriptions": [], "cartes": [], "levelup_notif": True
-        }
+        db[mid] = {}
     defaults = {
         "xp": 0, "level": 0, "coins": 0, "inventory": [], "equipped": [],
         "daily_streak": 0, "last_daily": None, "godfather": None,
@@ -34,5 +28,4 @@ def get_member_data(db, member_id):
     for key, default in defaults.items():
         if key not in db[mid]:
             db[mid][key] = default
-    # ✅ FIX CRITIQUE : était "return db[mid][phases.setup]" (erreur copier-coller)
-    return db[mid]
+    return db[mid]  # ✅ FIX CRITIQUE : plus de [phases.setup]

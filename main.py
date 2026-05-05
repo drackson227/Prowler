@@ -236,6 +236,7 @@ async def update_active_roles_loop():
 @client.event
 async def on_ready():
     print(f"✅ Bot connecté en tant que {client.user}")
+    await client.add_cog(__import__('trades').Trades(client))
     client.loop.create_task(daily_report_loop())
     client.loop.create_task(update_active_roles_loop())
     client.loop.create_task(shop_rotate_loop())

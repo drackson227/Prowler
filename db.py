@@ -29,7 +29,7 @@ def get_member_data(db, member_id):
         "daily_streak": 0, "last_daily": None, "godfather": None,
         "subscriptions": [], "cartes": [], "spam_mute_count": 0,
         "warns": 0, "total_warns": 0, "mutes": 0, "kicks": 0, "bans": 0,
-        "comments": [], "sanctions": []
+        "comments": [], "sanctions": [], "levelup_notif", True:
     }
     for key, default in defaults.items():
         if key not in db[mid]:

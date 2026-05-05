@@ -118,7 +118,7 @@ async def send_help(channel):
             "`!tradecancel @pseudo` — débloquer un trade figé"
             + VOC_SECTION
         )
-elif "moderation" in channel_name or "modération" in channel_name:
+    elif "moderation" in channel_name or "modération" in channel_name:
         embed.title = "📖 Commandes — Modération"
         embed.description = (
             "Tu peux écrire en **langage naturel** :\n\n"

@@ -14,6 +14,16 @@ from economy import analyze_member_messages, get_level_from_xp
 
 ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 
+async def is_moderation_command(content: str) -> bool:
+    """Détecte si un message ressemble à une commande de modération."""
+    content_lower = content.lower()
+    keywords = [
+        "ban", "kick", "mute", "warn", "unmute", "unban",
+        "supprimer", "supprime", "profil", "show_profile",
+        "sanction", "silence", "expulse", "expulser"
+    ]
+    return any(kw in content_lower for kw in keywords)
+    
 pending_actions = {}
 waiting_for_reason = {}
 waiting_for_member_choice = {}

@@ -22,14 +22,14 @@ def get_member_data(db, member_id):
             "bans": 0, "spam_mute_count": 0, "comments": [], "sanctions": [],
             "xp": 0, "level": 0, "coins": 0, "inventory": [], "equipped": [],
             "daily_streak": 0, "last_daily": None, "godfather": None,
-            "subscriptions": [], "cartes": []
+            "subscriptions": [], "cartes": [], "levelup_notif": True
         }
     defaults = {
         "xp": 0, "level": 0, "coins": 0, "inventory": [], "equipped": [],
         "daily_streak": 0, "last_daily": None, "godfather": None,
         "subscriptions": [], "cartes": [], "spam_mute_count": 0,
         "warns": 0, "total_warns": 0, "mutes": 0, "kicks": 0, "bans": 0,
-        "comments": [], "sanctions": [], "levelup_notif", True:
+        "comments": [], "sanctions": [], "levelup_notif": True
     }
     for key, default in defaults.items():
         if key not in db[mid]:

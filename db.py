@@ -34,4 +34,5 @@ def get_member_data(db, member_id):
     for key, default in defaults.items():
         if key not in db[mid]:
             db[mid][key] = default
+    # ✅ FIX CRITIQUE : était "return db[mid][phases.setup]" (erreur copier-coller)
     return db[mid]

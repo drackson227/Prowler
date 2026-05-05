@@ -7,7 +7,7 @@ ALLOWED_ROLES = ["Modérateur", "Fondateur"]
 FOUNDER_ROLES = ["Fondateur"]
 MOD_CHANNEL = "modération"
 LOG_CHANNEL = "📋・logs"
-GENERAL_CHANNEL = "💬・chat-général"
+GENERAL_CHANNEL = "chat-général"   # ✅ FIX: sans emoji pour normalize
 REPORT_CHANNEL = "📝・rapport-prowler"
 REPORT_HOUR = 20
 
@@ -17,27 +17,45 @@ ACTIVE_MESSAGES_PER_DAY = 10
 ACTIVE_DAYS_REQUIRED = 2
 INACTIVE_DAYS_REQUIRED = 2
 
+# ✅ FIX: SPAM_WINDOW réduit à 10 secondes
 SPAM_THRESHOLD = 10
-SPAM_WINDOW = 30
+SPAM_WINDOW = 10
 
 XP_PER_MESSAGE = 10
 COINS_PER_MESSAGE = 1
 COINS_BOOST = 2
 BOOST_INTERVAL = 300
-BOOST_DURATION = 1800
+BOOST_DURATION = 1800   # ✅ utilisé dans update_boost
 BOOST_INACTIVE = 360
 
 SHOP_ROTATE_INTERVAL = 10800
 GACHA_COST = 50
+
 STREAK_MULTIPLIERS = {3: 1.5, 7: 2.0, 14: 2.5, 30: 3.0}
 DAILY_BASE_COINS = 50
 
 AI_MODEL = "mistralai/mistral-7b-instruct:free"
 
+# ── Partie 3 : Tickets ──────────────────────────────────────
+TICKET_CATEGORY = "🎫 Tickets"
+TICKET_CHANNEL = "tickets"          # salon d'accueil des tickets
+MOD_ROLES_FOR_TICKETS = ["Modérateur", "Fondateur"]
+
+# ── Partie 3 : Anti-raid ────────────────────────────────────
+RAID_JOIN_THRESHOLD = 5             # nb de joins en moins de RAID_WINDOW secondes
+RAID_WINDOW = 60                    # secondes
+
+# ── Partie 3 : Alertes activité ─────────────────────────────
+ACTIVITY_ALERT_THRESHOLD = 15       # messages en ACTIVITY_WINDOW secondes
+ACTIVITY_ALERT_WINDOW = 60
+
 SYSTEM_PROMPT = """Tu es un assistant de modération Discord.
 À partir d'un message en langage naturel, tu dois extraire l'action de modération voulue et retourner un JSON.
+
 Actions possibles: ban, kick, mute, warn, delete_messages, unmute, unban, show_profile, none
+
 show_profile : quand le modérateur veut voir le profil, les infos, ou revoir un membre.
+
 Format de réponse JSON uniquement (pas de texte autour) :
 {
   "action": "ban|kick|mute|warn|delete_messages|unmute|unban|show_profile|none",
@@ -48,6 +66,7 @@ Format de réponse JSON uniquement (pas de texte autour) :
   "needs_clarification": false,
   "clarification_question": null
 }
+
 Si la cible n'est pas claire, mets needs_clarification à true.
 Si aucune action de modération n'est détectée, mets action à "none".
 """
@@ -55,6 +74,7 @@ Si aucune action de modération n'est détectée, mets action à "none".
 REASON_PROMPT = """Tu es un assistant de modération Discord.
 Reformule la raison donnée par un modérateur en une raison officielle, courte et professionnelle.
 Réponds UNIQUEMENT avec la raison reformulée, rien d'autre, pas de guillemets.
+
 Exemples :
 - "il est raciste" → "Comportement raciste"
 - "spam" → "Spam répété"
@@ -68,6 +88,7 @@ Donne une appréciation courte (3-5 lignes max) mentionnant :
 - S'il insulte souvent ou non
 - Son niveau d'activité dans les discussions
 - Une appréciation globale
+
 Réponds en français, de façon concise et professionnelle."""
 
 ACTION_COLORS = {

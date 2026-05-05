@@ -43,16 +43,16 @@ async def add_xp_and_coins(member, guild, xp_gain, coin_gain):
     save_db(db)
     if new_level > old_level:
         if data.get("levelup_notif", True):
-        try:
-            embed = discord.Embed(
-                title="🎉 Level Up !",
-                description=f"Félicitations ! Tu es maintenant **niveau {new_level}** sur **{guild.name}** !",
-                color=0xf1c40f
-            )
-            embed.add_field(name="📈 Nouveau niveau", value=f"**{new_level}**", inline=True)
-            embed.add_field(name="✨ XP gagné", value=f"+{xp_gain} XP", inline=True)
-            embed.add_field(name="🪙 Pièces gagnées", value=f"+{coin_gain} 🪙", inline=True)
-            embed.add_field(name="✨ XP total", value=str(data["xp"]), inline=True)
+            try:
+                embed = discord.Embed(
+                    title="🎉 Level Up !",
+                    description=f"Félicitations ! Tu es maintenant **niveau {new_level}** sur **{guild.name}** !",
+                    color=0xf1c40f
+                )
+                embed.add_field(name="📈 Nouveau niveau", value=f"**{new_level}**", inline=True)
+                embed.add_field(name="✨ XP gagné", value=f"+{xp_gain} XP", inline=True)
+                embed.add_field(name="🪙 Pièces gagnées", value=f"+{coin_gain} 🪙", inline=True)
+                embed.add_field(name="✨ XP total", value=str(data["xp"]), inline=True)
             embed.add_field(name="🪙 Solde total", value=str(data["coins"]), inline=True)
             embed.add_field(name="📊 Prochain niveau", value=f"{xp_for_level(new_level)} XP requis", inline=True)
             embed.set_footer(text="Continue comme ça ! 💪")

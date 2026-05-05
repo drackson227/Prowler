@@ -53,12 +53,12 @@ async def add_xp_and_coins(member, guild, xp_gain, coin_gain):
                 embed.add_field(name="✨ XP gagné", value=f"+{xp_gain} XP", inline=True)
                 embed.add_field(name="🪙 Pièces gagnées", value=f"+{coin_gain} 🪙", inline=True)
                 embed.add_field(name="✨ XP total", value=str(data["xp"]), inline=True)
-            embed.add_field(name="🪙 Solde total", value=str(data["coins"]), inline=True)
-            embed.add_field(name="📊 Prochain niveau", value=f"{xp_for_level(new_level)} XP requis", inline=True)
-            embed.set_footer(text="Continue comme ça ! 💪")
-            await member.send(embed=embed)
-        except:
-            pass
+                embed.add_field(name="🪙 Solde total", value=str(data["coins"]), inline=True)
+                embed.add_field(name="📊 Prochain niveau", value=f"{xp_for_level(new_level)} XP requis", inline=True)
+                embed.set_footer(text="Continue comme ça ! 💪")
+                await member.send(embed=embed)
+            except:
+                pass
 
 async def analyze_member_messages(guild, member):
     messages = []

@@ -85,15 +85,17 @@ async def log_action(guild, action, moderator, target, reason=None, extra=None):
     if not log_ch:
         return
     colors = {
-        "ban": 0xe74c3c, "kick": 0xe67e22, "mute": 0xf39c12,
-        "unmute": 0x2ecc71, "unban": 0x2ecc71, "warn": 0xf1c40f,
-        "spam_mute": 0xff6b35, "join": 0x2ecc71, "leave": 0x95a5a6,
-        "comment_add": 0x3498db, "comment_remove": 0xe74c3c,
-        "delete_messages": 0x9b59b6, "show_profile": 0x95a5a6,
-        "shop_buy": 0x2ecc71, "shop_equip": 0x3498db,
-        "gacha": 0xf1c40f, "daily": 0xf39c12,
-        "give_coins": 0xf1c40f, "give_role": 0x2ecc71,
-    }
+    "ban": 0xe74c3c, "kick": 0xe67e22, "mute": 0xf39c12,
+    "unmute": 0x2ecc71, "unban": 0x2ecc71, "warn": 0xf1c40f,
+    "spam_mute": 0xff6b35, "join": 0x2ecc71, "leave": 0x95a5a6,
+    "comment_add": 0x3498db, "comment_remove": 0xe74c3c,
+    "delete_messages": 0x9b59b6, "show_profile": 0x95a5a6,
+    "shop_buy": 0x2ecc71, "shop_equip": 0x3498db,
+    "gacha": 0xf1c40f, "daily": 0xf39c12,
+    "give_coins": 0xf1c40f, "give_role": 0x2ecc71,
+    "ticket_open": 0x3498db,   # ← AJOUTE ÇA
+    "ticket_close": 0x95a5a6,  # ← AJOUTE ÇA
+}
     labels = {
         "ban": "🔨 Bannissement", "kick": "👢 Kick", "mute": "🔇 Mute",
         "unmute": "🔊 Demute", "unban": "✅ Déban", "warn": "⚠️ Avertissement",

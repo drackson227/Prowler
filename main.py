@@ -408,11 +408,6 @@ async def on_reaction_add(reaction, user):
             pending_actions.pop(msg_id)
             await reaction.message.channel.send(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))
 
-@client.event
-async def on_message(message):
-    if message.author.bot:
-        return
-
     from utils import check_spam
     channel_name = normalize_name(message.channel.name)
     content = message.content.strip()
@@ -562,7 +557,7 @@ async def on_message(message):
         return
     if action_data.get("needs_clarification"):
         await message.channel.send(f"❓ {action_data.get('clarification_question')}")
-        return
+        return process_commands
 
     exact, similar, is_id, is_banned = await find_member(message.guild, action_data.get("target", ""), message.channel)
     await handle_member_resolution(message.channel, action_data, message.author.id, exact, similar, is_id, is_banned)

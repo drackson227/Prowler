@@ -561,7 +561,7 @@ async def on_message(message):
         if content_lower == "!boutique": await cmd_boutique(message); return
         if content_lower.startswith("!acheter "): await cmd_acheter(message, content[9:].strip()); return
         if content_lower.startswith("!équiper "): await cmd_equiper(message, content[9:].strip()); return
-        if content_lower == "!spin": await cmd_spin(message); return
+        if content_lower == "!rolespin": await cmd_spin(message); return
 
     if content_lower == "!daily":
         await cmd_daily(message)

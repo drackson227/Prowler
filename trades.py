@@ -42,10 +42,81 @@ def trouver_carte_exacte(cartes, nom):
             return i, c
     return None, None
 
+# ── Création du salon privé temporaire ───────────────────────────────────────
+async def creer_salon_trade(guild, auteur, cible):
+    """Crée un salon privé temporaire visible uniquement par auteur, cible et modos."""
+    # Cherche la catégorie "trades" ou en crée une
+    categorie = discord.utils.get(guild.categories, name="trades")
+    
+    # Permissions de base : personne ne voit
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        auteur: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, read_message_history=True, add_reactions=True
+        ),
+        cible: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, read_message_history=True, add_reactions=True
+        ),
+        guild.me: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, read_message_history=True,
+            manage_channels=True, add_reactions=True, manage_messages=True
+        ),
+    }
+    # Ajoute les modérateurs (rôles Modérateur et Fondateur)
+    for role_name in ["Modérateur", "Fondateur"]:
+        role = discord.utils.get(guild.roles, name=role_name)
+        if role:
+            overwrites[role] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, read_message_history=True
+            )
+
+    salon_name = f"trade-{auteur.name}-{cible.name}"[:100]
+    try:
+        salon = await guild.create_text_channel(
+            name=salon_name,
+            category=categorie,
+            overwrites=overwrites,
+            topic=f"Trade privé entre {auteur.display_name} et {cible.display_name}"
+        )
+        return salon
+    except Exception as e:
+        print(f"❌ Impossible de créer le salon trade : {e}")
+        return None
+
+async def fermer_salon_trade(salon, auteur, cible, succes):
+    """Envoie le message de fin et supprime le salon après 60s."""
+    if succes:
+        embed_fin = discord.Embed(
+            title="✅ Trade terminé avec succès !",
+            description=(
+                f"Le trade entre {auteur.mention} et {cible.mention} est **terminé**.\n\n"
+                "Les cartes et pièces ont été échangées.\n"
+                "🗑️ Ce salon sera supprimé dans **60 secondes**."
+            ),
+            color=0x2ECC71
+        )
+    else:
+        embed_fin = discord.Embed(
+            title="❌ Trade annulé / expiré",
+            description=(
+                f"Le trade entre {auteur.mention} et {cible.mention} n'a **pas abouti**.\n\n"
+                "🗑️ Ce salon sera supprimé dans **60 secondes**."
+            ),
+            color=0xE74C3C
+        )
+    embed_fin.set_footer(text="Salon temporaire — suppression automatique")
+    await salon.send(embed=embed_fin)
+    await asyncio.sleep(60)
+    try:
+        await salon.delete(reason="Trade terminé")
+    except Exception:
+        pass
+
+# ── Interface sélection cartes ────────────────────────────────────────────────
 async def interface_selection_cartes(bot, channel, author, membre_db, titre, couleur=0x5865F2):
     cartes = membre_db.get("cartes", [])
     if not cartes:
-        await channel.send("❌ Tu n'as aucune carte dans ton inventaire.")
+        await channel.send(f"{author.mention} ❌ Tu n'as aucune carte dans ton inventaire.")
         return None
 
     cartes_triees = sorted(
@@ -74,10 +145,10 @@ async def interface_selection_cartes(bot, channel, author, membre_db, titre, cou
         if fin < len(cartes_triees): reactions.append("▶")
         reactions.append("❌")
         if msg is None:
-            msg = await channel.send(embed=embed)
+            msg = await channel.send(f"{author.mention}", embed=embed)
         else:
             await msg.clear_reactions()
-            await msg.edit(embed=embed)
+            await msg.edit(content=f"{author.mention}", embed=embed)
         for r in reactions:
             await msg.add_reaction(r)
         return msg, page_cartes
@@ -92,13 +163,13 @@ async def interface_selection_cartes(bot, channel, author, membre_db, titre, cou
         try:
             reaction, _ = await bot.wait_for("reaction_add", timeout=DUREE_SELECTION, check=check)
         except asyncio.TimeoutError:
-            await msg.edit(content="⌛ Sélection expirée.", embed=None)
+            await msg.edit(content=f"{author.mention} ⌛ Sélection expirée.", embed=None)
             await msg.clear_reactions()
             return None
 
         emoji = str(reaction.emoji)
         if emoji == "❌":
-            await msg.edit(content="❌ Sélection annulée.", embed=None)
+            await msg.edit(content=f"{author.mention} ❌ Sélection annulée.", embed=None)
             await msg.clear_reactions()
             return None
         if emoji == "▶":
@@ -116,14 +187,14 @@ async def interface_selection_cartes(bot, channel, author, membre_db, titre, cou
         )
         embed_valid.set_image(url=carte_choisie.get("image_url", ""))
         embed_valid.set_footer(text="Carte ajoutée à ton offre.")
-        await channel.send(embed=embed_valid, delete_after=10)
+        await channel.send(f"{author.mention}", embed=embed_valid, delete_after=10)
         await msg.clear_reactions()
         return carte_choisie
 
 async def interface_fuzzy(bot, channel, author, cartes, nom):
     resultats = top3_fuzzy(cartes, nom)
     if not resultats:
-        await channel.send(f"❌ Aucune carte ressemblant à **{nom}** trouvée.")
+        await channel.send(f"{author.mention} ❌ Aucune carte ressemblant à **{nom}** trouvée.")
         return None
     if resultats[0][2] >= 0.95:
         return resultats[0][1]
@@ -136,7 +207,7 @@ async def interface_fuzzy(bot, channel, author, cartes, nom):
         color=0xF1C40F
     )
     embed.set_footer(text="Réagis avec le numéro • ❌ annuler")
-    msg = await channel.send(embed=embed)
+    msg = await channel.send(f"{author.mention}", embed=embed)
     for n in range(len(resultats)):
         await msg.add_reaction(NUMEROS[n])
     await msg.add_reaction("❌")
@@ -147,11 +218,11 @@ async def interface_fuzzy(bot, channel, author, cartes, nom):
     try:
         reaction, _ = await bot.wait_for("reaction_add", timeout=30.0, check=check)
     except asyncio.TimeoutError:
-        await msg.edit(content="⌛ Expiré.", embed=None)
+        await msg.edit(content=f"{author.mention} ⌛ Expiré.", embed=None)
         return None
 
     if str(reaction.emoji) == "❌":
-        await msg.edit(content="❌ Annulé.", embed=None)
+        await msg.edit(content=f"{author.mention} ❌ Annulé.", embed=None)
         return None
 
     num = NUMEROS.index(str(reaction.emoji))
@@ -162,7 +233,7 @@ async def interface_fuzzy(bot, channel, author, cartes, nom):
         color=RARETES_COULEUR.get(rarete, 0x5865F2)
     )
     embed_valid.set_image(url=carte_choisie.get("image_url", ""))
-    await channel.send(embed=embed_valid, delete_after=10)
+    await channel.send(f"{author.mention}", embed=embed_valid, delete_after=10)
     await msg.clear_reactions()
     return carte_choisie
 
@@ -182,7 +253,7 @@ async def construire_offre(bot, channel, author, membre_db, nom_membre):
         )
         embed_menu.add_field(name="Actions", value="🃏 Ajouter une carte\n🪙 Ajouter des pièces\n✅ Valider\n❌ Annuler", inline=False)
         embed_menu.set_footer(text=f"Solde disponible : {membre_db.get('coins', 0)} pièces")
-        msg_menu = await channel.send(embed=embed_menu)
+        msg_menu = await channel.send(f"{author.mention}", embed=embed_menu)
         for emoji in ["🃏", "🪙", "✅", "❌"]:
             await msg_menu.add_reaction(emoji)
 
@@ -192,7 +263,7 @@ async def construire_offre(bot, channel, author, membre_db, nom_membre):
         try:
             reaction, _ = await bot.wait_for("reaction_add", timeout=DUREE_SELECTION, check=check_menu)
         except asyncio.TimeoutError:
-            await msg_menu.edit(content="⌛ Offre expirée.", embed=None)
+            await msg_menu.edit(content=f"{author.mention} ⌛ Offre expirée.", embed=None)
             await msg_menu.clear_reactions()
             return None, None
 
@@ -200,21 +271,21 @@ async def construire_offre(bot, channel, author, membre_db, nom_membre):
         choix = str(reaction.emoji)
 
         if choix == "❌":
-            await msg_menu.edit(content="❌ Trade annulé.", embed=None)
+            await msg_menu.edit(content=f"{author.mention} ❌ Trade annulé.", embed=None)
             return None, None
 
         if choix == "✅":
             if not cartes_choisies and coins_choisis == 0:
-                await channel.send("❌ Offre vide !", delete_after=5)
+                await channel.send(f"{author.mention} ❌ Offre vide !", delete_after=5)
                 continue
             return cartes_choisies, coins_choisis
 
         if choix == "🪙":
             solde = membre_db.get("coins", 0) - coins_choisis
             if solde <= 0:
-                await channel.send("❌ Plus de pièces disponibles.", delete_after=5)
+                await channel.send(f"{author.mention} ❌ Plus de pièces disponibles.", delete_after=5)
                 continue
-            await channel.send(f"🪙 Combien de pièces ? *(Solde restant : **{solde} pièces**)*\nTape le montant ou `annuler`.")
+            await channel.send(f"{author.mention} 🪙 Combien de pièces ? *(Solde restant : **{solde} pièces**)*\nTape le montant ou `annuler`.")
 
             def check_msg(m):
                 return m.author == author and m.channel == channel
@@ -222,28 +293,28 @@ async def construire_offre(bot, channel, author, membre_db, nom_membre):
             try:
                 reponse = await bot.wait_for("message", timeout=30.0, check=check_msg)
             except asyncio.TimeoutError:
-                await channel.send("⌛ Temps écoulé.", delete_after=5)
+                await channel.send(f"{author.mention} ⌛ Temps écoulé.", delete_after=5)
                 continue
 
             await reponse.delete()
             if reponse.content.lower() == "annuler":
                 continue
             if not reponse.content.isdigit() or int(reponse.content) <= 0:
-                await channel.send("❌ Montant invalide.", delete_after=5)
+                await channel.send(f"{author.mention} ❌ Montant invalide.", delete_after=5)
                 continue
             montant = int(reponse.content)
             if montant > solde:
-                await channel.send(f"❌ Tu n'as que **{solde} pièces** disponibles.", delete_after=5)
+                await channel.send(f"{author.mention} ❌ Tu n'as que **{solde} pièces** disponibles.", delete_after=5)
                 continue
             coins_choisis += montant
-            await channel.send(f"✅ **{montant} pièces** ajoutées.", delete_after=5)
+            await channel.send(f"{author.mention} ✅ **{montant} pièces** ajoutées.", delete_after=5)
             continue
 
         if choix == "🃏":
             noms_deja_choisis = [c["nom"] for c in cartes_choisies]
             cartes_restantes = {"cartes": [c for c in membre_db.get("cartes", []) if c["nom"] not in noms_deja_choisis], "coins": membre_db.get("coins", 0)}
             if not cartes_restantes["cartes"]:
-                await channel.send("❌ Plus de cartes disponibles.", delete_after=5)
+                await channel.send(f"{author.mention} ❌ Plus de cartes disponibles.", delete_after=5)
                 continue
             carte = await interface_selection_cartes(bot, channel, author, cartes_restantes, "🃏 Choisis une carte", couleur=0x5865F2)
             if carte:
@@ -296,7 +367,7 @@ async def _executer_trade(bot, channel, auteur, cible, offre_cartes_obj, coins_o
         await msg.edit(embed=embed_ref)
         return False
 
-    # Exécution
+    # Exécution des échanges
     uid_auteur = str(auteur.id)
     uid_cible = str(cible.id)
     db = load_db()
@@ -316,6 +387,7 @@ async def _executer_trade(bot, channel, auteur, cible, offre_cartes_obj, coins_o
     await msg.edit(embed=build_embed_trade(auteur, cible, offre_cartes_obj, coins_offre, demande_cartes_obj, coins_demande, "accepté"))
     return True
 
+
 class Trades(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -330,6 +402,7 @@ class Trades(commands.Cog):
         return True
 
     async def _lancer_trade(self, bot, channel, auteur, cible, args=None):
+        """Lance le trade dans un salon privé temporaire."""
         db = load_db()
         uid_auteur = str(auteur.id)
         uid_cible = str(cible.id)
@@ -338,14 +411,42 @@ class Trades(commands.Cog):
         save_db(db)
         db = load_db()
 
+        # Crée le salon privé
+        salon_prive = await creer_salon_trade(channel.guild, auteur, cible)
+        if salon_prive is None:
+            await channel.send(
+                f"{auteur.mention} ❌ Impossible de créer le salon privé. "
+                "Vérifie que le bot a la permission **Gérer les salons**."
+            )
+            return
+
+        # Annonce dans le salon public
+        await channel.send(
+            f"{auteur.mention} {cible.mention} — 🔒 Un salon privé a été créé pour votre trade : {salon_prive.mention}"
+        )
+
         self.trades_actifs.add(auteur.id)
         self.trades_actifs.add(cible.id)
+        succes = False
         try:
+            # Message de bienvenue dans le salon privé
+            embed_bienvenue = discord.Embed(
+                title="🔒 Salon de trade privé",
+                description=(
+                    f"Bienvenue {auteur.mention} et {cible.mention} !\n\n"
+                    "Ce salon est **visible uniquement par vous deux** (et les modérateurs).\n"
+                    "Le trade va commencer maintenant. 🎴"
+                ),
+                color=0x5865F2
+            )
+            embed_bienvenue.set_footer(text="Ce salon sera supprimé automatiquement à la fin du trade.")
+            await salon_prive.send(embed=embed_bienvenue)
+
             if args:
                 args_lower = args.lower()
                 if not args_lower.startswith("give ") or " contre " not in args_lower:
-                    await channel.send(
-                        "❌ Format : `trade @membre give [carte/pièces] contre [carte/pièces]`\n"
+                    await salon_prive.send(
+                        f"{auteur.mention} ❌ Format : `trade @membre give [carte/pièces] contre [carte/pièces]`\n"
                         "Ou sans args pour l'interface interactive.\n\n"
                         "**Exemples :**\n"
                         "`!trade @Bob give Kebab Froid contre Pigeon de Paris`\n"
@@ -378,7 +479,7 @@ class Trades(commands.Cog):
                 for nom in noms_offre:
                     idx, carte = trouver_carte_exacte(db[uid_auteur].get("cartes", []), nom)
                     if idx is None:
-                        carte = await interface_fuzzy(bot, channel, auteur, db[uid_auteur].get("cartes", []), nom)
+                        carte = await interface_fuzzy(bot, salon_prive, auteur, db[uid_auteur].get("cartes", []), nom)
                         if carte is None: return
                     offre_cartes_obj.append(carte)
 
@@ -386,36 +487,43 @@ class Trades(commands.Cog):
                 for nom in noms_demande:
                     idx, carte = trouver_carte_exacte(db[uid_cible].get("cartes", []), nom)
                     if idx is None:
-                        carte = await interface_fuzzy(bot, channel, cible, db[uid_cible].get("cartes", []), nom)
+                        carte = await interface_fuzzy(bot, salon_prive, cible, db[uid_cible].get("cartes", []), nom)
                         if carte is None: return
                     demande_cartes_obj.append(carte)
 
                 if coins_offre > db[uid_auteur].get("coins", 0):
-                    await channel.send(f"❌ Tu n'as que **{db[uid_auteur].get('coins', 0)} pièces**.")
+                    await salon_prive.send(f"{auteur.mention} ❌ Tu n'as que **{db[uid_auteur].get('coins', 0)} pièces**.")
                     return
                 if coins_demande > db[uid_cible].get("coins", 0):
-                    await channel.send(f"❌ **{cible.display_name}** n'a que **{db[uid_cible].get('coins', 0)} pièces**.")
+                    await salon_prive.send(f"{cible.mention} ❌ **{cible.display_name}** n'a que **{db[uid_cible].get('coins', 0)} pièces**.")
                     return
             else:
-                await channel.send(f"🔄 **Trade interactif !**\n{auteur.mention}, construis ton offre pour {cible.mention}.")
-                offre_cartes_obj, coins_offre = await construire_offre(bot, channel, auteur, db[uid_auteur], auteur.display_name)
+                await salon_prive.send(
+                    f"🔄 **Trade interactif !**\n{auteur.mention}, construis ton offre pour {cible.mention}."
+                )
+                offre_cartes_obj, coins_offre = await construire_offre(bot, salon_prive, auteur, db[uid_auteur], auteur.display_name)
                 if offre_cartes_obj is None: return
-                await channel.send(f"✅ Offre de {auteur.mention} construite !\n{cible.mention}, qu'est-ce que tu proposes en échange ?")
-                demande_cartes_obj, coins_demande = await construire_offre(bot, channel, cible, db[uid_cible], cible.display_name)
+                await salon_prive.send(
+                    f"✅ Offre de {auteur.mention} construite !\n{cible.mention}, qu'est-ce que tu proposes en échange ?"
+                )
+                demande_cartes_obj, coins_demande = await construire_offre(bot, salon_prive, cible, db[uid_cible], cible.display_name)
                 if demande_cartes_obj is None: return
 
-            await _executer_trade(bot, channel, auteur, cible, offre_cartes_obj, coins_offre, demande_cartes_obj, coins_demande)
+            succes = await _executer_trade(bot, salon_prive, auteur, cible, offre_cartes_obj, coins_offre, demande_cartes_obj, coins_demande)
         finally:
             self.trades_actifs.discard(auteur.id)
             self.trades_actifs.discard(cible.id)
+            # Message de fin + suppression du salon
+            await fermer_salon_trade(salon_prive, auteur, cible, succes)
 
     # ── ! commandes ──────────────────────────────────────────
     @commands.command(name="trade")
     async def trade(self, ctx, cible: discord.Member, *, args: str = None):
         if not await self.verif_salon(ctx.channel, SALON_TRADES): return
-        if cible.bot or cible == ctx.author: return await ctx.send("❌ Destinataire invalide.")
+        if cible.bot or cible == ctx.author:
+            return await ctx.send(f"{ctx.author.mention} ❌ Destinataire invalide.")
         if ctx.author.id in self.trades_actifs or cible.id in self.trades_actifs:
-            return await ctx.send("❌ L'un de vous est déjà en cours de trade.")
+            return await ctx.send(f"{ctx.author.mention} ❌ L'un de vous est déjà en cours de trade.")
         await self._lancer_trade(self.bot, ctx.channel, ctx.author, cible, args)
 
     @commands.command(name="donner")
@@ -442,9 +550,9 @@ class Trades(commands.Cog):
         await interaction.response.defer()
         if not await self.verif_salon(interaction.channel, SALON_TRADES): return
         if membre.bot or membre == interaction.user:
-            return await interaction.followup.send("❌ Destinataire invalide.", ephemeral=True)
+            return await interaction.followup.send(f"{interaction.user.mention} ❌ Destinataire invalide.", ephemeral=True)
         if interaction.user.id in self.trades_actifs or membre.id in self.trades_actifs:
-            return await interaction.followup.send("❌ L'un de vous est déjà en cours de trade.", ephemeral=True)
+            return await interaction.followup.send(f"{interaction.user.mention} ❌ L'un de vous est déjà en cours de trade.", ephemeral=True)
         await self._lancer_trade(self.bot, interaction.channel, interaction.user, membre, None)
 
     @app_commands.command(name="donner", description="Donne des pièces à un membre")
@@ -454,11 +562,12 @@ class Trades(commands.Cog):
         if not await self.verif_salon(interaction.channel, SALON_TRADES): return
         await _do_donner(self.bot, interaction.channel, interaction.user, membre, montant)
 
+
 async def _do_donner(bot, channel, auteur, cible, montant):
     if cible.bot or cible == auteur:
-        return await channel.send("❌ Destinataire invalide.")
+        return await channel.send(f"{auteur.mention} ❌ Destinataire invalide.")
     if montant <= 0:
-        return await channel.send("❌ Le montant doit être supérieur à 0 pièces.")
+        return await channel.send(f"{auteur.mention} ❌ Le montant doit être supérieur à 0 pièces.")
 
     db = load_db()
     uid_auteur = str(auteur.id)
@@ -468,7 +577,7 @@ async def _do_donner(bot, channel, auteur, cible, montant):
     solde = db[uid_auteur].get("coins", 0)
 
     if solde < montant:
-        return await channel.send(f"❌ Tu n'as que **{solde} pièces**, tu ne peux pas en donner {montant} pièces.")
+        return await channel.send(f"{auteur.mention} ❌ Tu n'as que **{solde} pièces**, tu ne peux pas en donner {montant} pièces.")
 
     embed = discord.Embed(
         title="🪙 Confirmation de don",
@@ -476,7 +585,7 @@ async def _do_donner(bot, channel, auteur, cible, montant):
         color=0xF1C40F
     )
     embed.set_footer(text="✅ Confirmer  •  ❌ Annuler  •  Expire dans 30s")
-    msg = await channel.send(embed=embed)
+    msg = await channel.send(f"{auteur.mention}", embed=embed)
     await msg.add_reaction("✅")
     await msg.add_reaction("❌")
 
@@ -503,9 +612,14 @@ async def _do_donner(bot, channel, auteur, cible, montant):
 
     await msg.edit(embed=discord.Embed(
         title="🪙 Don effectué !",
-        description=f"{auteur.mention} a donné **{montant} pièces** à {cible.mention} !\n\n💰 Solde de {auteur.display_name} : **{db[uid_auteur]['coins']} pièces**\n💰 Solde de {cible.display_name} : **{db[uid_cible]['coins']} pièces**",
+        description=(
+            f"{auteur.mention} a donné **{montant} pièces** à {cible.mention} !\n\n"
+            f"💰 Solde de {auteur.display_name} : **{db[uid_auteur]['coins']} pièces**\n"
+            f"💰 Solde de {cible.display_name} : **{db[uid_cible]['coins']} pièces**"
+        ),
         color=0x2ECC71
     ))
+
 
 async def setup(bot):
     await bot.add_cog(Trades(bot))

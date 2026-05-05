@@ -363,88 +363,297 @@ async def handle_member_resolution(channel, action_data, author_id, exact, simil
     await ask_member_choice(channel, action_data, author_id, all_candidates)
 
 async def cmd_give(message, args):
-    is_founder = any(role.name in FOUNDER_ROLES for role in message.author.roles)
-    is_owner = message.guild.owner_id == message.author.id
-    if not is_founder and not is_owner:
-        await message.channel.send(embed=discord.Embed(
-            title="❌ Permission refusée",
-            description="Seul le **Fondateur** peut utiliser `!give`.",
-            color=0xe74c3c
-        ))
-        return
+    from config import FOUNDER_ROLES
+    if not any(role.name in FOUNDER_ROLES for role in message.author.roles):
+        if message.guild.owner_id != message.author.id:
+            await message.channel.send(embed=discord.Embed(
+                title="❌ Permission refusée",
+                description="Seul le **Fondateur** peut utiliser `!give`.",
+                color=0xe74c3c
+            ))
+            return
+
     mentions = message.mentions
     if not mentions or not args:
         await message.channel.send(embed=discord.Embed(
             title="❓ Usage de !give",
             description=(
-                "**Pièces :**\n"
-                "`!give @membre 500` — donne 500 pièces\n"
-                "`!give @membre coins:500` — même chose\n\n"
-                "**Rôle :**\n"
-                "`!give @membre role:NomDuRole` — donne un rôle Discord\n\n"
-                "Exemples :\n• `!give @Zertyx 1000000`\n• `!give @Zertyx role:Rôle Gold`"
+                "`!give @membre 500` — donne des pièces\n"
+                "`!give @membre coins:500` — donne des pièces\n"
+                "`!give @membre role NomDuRole` — donne un rôle (fuzzy)\n"
+                "`!give @membre carte NomDeLaCarte` — donne une carte (fuzzy)"
             ),
             color=0x3498db
         ))
         return
+
     target = mentions[0]
     clean = args
     for m in message.mentions:
         clean = clean.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
     clean = clean.strip()
-    if clean.lower().startswith("role:"):
-        role_name = clean[5:].strip()
-        role = discord.utils.get(message.guild.roles, name=role_name)
-        if not role:
-            await message.channel.send(f"❌ Rôle **{role_name}** introuvable sur le serveur.")
-            return
+
+    from difflib import SequenceMatcher
+
+    def fuzzy_score(a, b):
+        a_l, b_l = a.lower(), b.lower()
+        if a_l == b_l: return 1.0
+        if a_l in b_l: return 0.9
+        return SequenceMatcher(None, a_l, b_l).ratio()
+
+    async def wait_reaction(channel, author_id, bot_msg, valid_emojis, timeout=30):
+        def check(reaction, user):
+            return (
+                user.id == author_id
+                and reaction.message.id == bot_msg.id
+                and str(reaction.emoji) in valid_emojis
+            )
         try:
-            await target.add_roles(role, reason=f"!give par {message.author.display_name}")
+            reaction, _ = await channel._state._get_client().wait_for(
+                "reaction_add", timeout=timeout, check=check
+            )
+            return str(reaction.emoji)
+        except asyncio.TimeoutError:
+            return None
+
+    # ── Pièces ──────────────────────────────────────────────
+    if clean.isdigit() or clean.lower().startswith("coins:"):
+        raw = clean[6:].strip() if clean.lower().startswith("coins:") else clean
+        if not raw.isdigit():
+            await message.channel.send("❌ Montant invalide. Ex: `!give @membre 200`")
+            return
+        amount = int(raw)
+        db = load_db()
+        data = get_member_data(db, target.id)
+        data["coins"] += amount
+        save_db(db)
+        embed = discord.Embed(
+            title="🪙 Pièces données !",
+            description=f"**{amount}** 🪙 ont été ajoutées à {target.mention}\nNouveau solde : **{data['coins']}** 🪙",
+            color=0xf1c40f
+        )
+        embed.set_thumbnail(url=target.display_avatar.url)
+        await message.channel.send(embed=embed)
+        from utils import log_action
+        await log_action(message.guild, "give_coins", message.author, target, extra={"Pièces": f"+{amount}", "Solde": data["coins"]})
+        return
+
+    # ── Rôle ────────────────────────────────────────────────
+    if clean.lower().startswith("role:") or clean.lower().startswith("role "):
+        role_query = clean[5:].strip()
+        if not role_query:
+            await message.channel.send("❌ Précise le nom du rôle. Ex: `!give @membre role Rose`")
+            return
+
+        roles_scored = []
+        for role in message.guild.roles:
+            if role.name == "@everyone":
+                continue
+            s = fuzzy_score(role_query, role.name)
+            if s >= 0.4:
+                roles_scored.append((s, role))
+        roles_scored.sort(key=lambda x: x[0], reverse=True)
+        top = roles_scored[:3]
+
+        if not top:
+            await message.channel.send(f"❌ Aucun rôle ressemblant à **{role_query}** trouvé.")
+            return
+
+        if top[0][0] >= 0.95:
+            found_role = top[0][1]
+        else:
+            emojis = ["1️⃣", "2️⃣", "3️⃣"]
+            lignes = []
+            for i, (s, r) in enumerate(top):
+                color_circle = "⬛"
+                if r.color.value:
+                    rv = (r.color.value >> 16) & 0xFF
+                    gv = (r.color.value >> 8) & 0xFF
+                    bv = r.color.value & 0xFF
+                    if rv > 200 and gv < 100 and bv < 100: color_circle = "🔴"
+                    elif gv > 200 and rv < 100 and bv < 100: color_circle = "🟢"
+                    elif bv > 200 and rv < 100 and gv < 100: color_circle = "🔵"
+                    elif rv > 200 and gv > 200 and bv < 100: color_circle = "🟡"
+                    elif rv > 150 and bv > 150 and gv < 100: color_circle = "🟣"
+                    elif rv > 200 and gv > 100 and bv < 50: color_circle = "🟠"
+                    elif rv > 200 and gv > 200 and bv > 200: color_circle = "⬜"
+                lignes.append(f"{emojis[i]} {color_circle} **{r.name}**")
+
+            embed = discord.Embed(
+                title="🔍 Quel rôle voulais-tu dire ?",
+                description="\n".join(lignes),
+                color=0xf39c12
+            )
+            embed.set_footer(text="Réagis avec le numéro • ❌ pour annuler • Expire dans 30s")
+            bot_msg = await message.channel.send(embed=embed)
+            for i in range(len(top)):
+                await bot_msg.add_reaction(emojis[i])
+            await bot_msg.add_reaction("❌")
+
+            emoji = await wait_reaction(message.channel, message.author.id, bot_msg, emojis[:len(top)] + ["❌"])
+            if emoji is None or emoji == "❌":
+                await bot_msg.edit(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))
+                return
+            found_role = top[emojis.index(emoji)][1]
+
+        # Confirmation
+        confirm_embed = discord.Embed(
+            title="⚠️ Confirmer l'attribution",
+            description=f"Donner le rôle **{found_role.name}** à {target.mention} ?",
+            color=found_role.color if found_role.color.value else discord.Color(0x3498db)
+        )
+        confirm_embed.set_thumbnail(url=target.display_avatar.url)
+        confirm_embed.set_footer(text="✅ confirmer • ❌ annuler • Expire dans 30s")
+        confirm_msg = await message.channel.send(embed=confirm_embed)
+        await confirm_msg.add_reaction("✅")
+        await confirm_msg.add_reaction("❌")
+
+        emoji = await wait_reaction(message.channel, message.author.id, confirm_msg, ["✅", "❌"])
+        if emoji is None or emoji == "❌":
+            await confirm_msg.edit(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))
+            return
+
+        try:
+            await target.add_roles(found_role, reason=f"!give par {message.author.display_name}")
             db = load_db()
             data = get_member_data(db, target.id)
-            if not any(i.get("name", "") == role_name for i in data["inventory"]):
-                data["inventory"].append({"id": role_name.lower().replace(" ", "_"), "name": role_name, "type": "role_color"})
-            save_db(db)
-            embed = discord.Embed(
+            already = any(i.get("name", "") == found_role.name for i in data.get("inventory", []))
+            if not already:
+                data.setdefault("inventory", []).append({
+                    "id": found_role.name.lower().replace(" ", "_"),
+                    "name": found_role.name,
+                    "type": "role_color"
+                })
+                save_db(db)
+            await confirm_msg.edit(embed=discord.Embed(
                 title="🎁 Rôle donné !",
-                description=f"Le rôle **{role_name}** a été attribué à {target.mention}",
-                color=role.color.value if role.color.value else 0x2ecc71
-            )
-            embed.set_thumbnail(url=target.display_avatar.url)
-            await message.channel.send(embed=embed)
-            await log_action(message.guild, "give_role", message.author, target, extra={"Rôle": role_name})
+                description=f"Le rôle **{found_role.name}** a été attribué à {target.mention}",
+                color=found_role.color if found_role.color.value else discord.Color(0x2ecc71)
+            ))
+            from utils import log_action
+            await log_action(message.guild, "give_role", message.author, target, extra={"Rôle": found_role.name})
         except discord.Forbidden:
-            await message.channel.send(f"❌ Je n'ai pas la permission d'attribuer le rôle **{role_name}**.")
+            await confirm_msg.edit(embed=discord.Embed(
+                title="❌ Permission refusée",
+                description=f"Je n'ai pas la permission d'attribuer **{found_role.name}**.",
+                color=0xe74c3c
+            ))
         return
-    if clean.lower().startswith("coins:"):
+
+    # ── Carte ────────────────────────────────────────────────
+    if clean.lower().startswith("carte:") or clean.lower().startswith("carte "):
+        carte_query = clean[6:].strip()
+        if not carte_query:
+            await message.channel.send("❌ Précise le nom de la carte. Ex: `!give @membre carte Kebab Froid`")
+            return
+
+        # Import du catalogue de cartes
         try:
-            amount = int(clean[6:].strip().split()[0])
-        except:
-            await message.channel.send("❌ Format invalide. Ex: `!give @membre coins:200`")
+            from cards import CARTES, RARETES
+        except ImportError:
+            await message.channel.send("❌ Impossible de charger le catalogue de cartes.")
             return
-    else:
-        parts = clean.split()
-        if parts and parts[0].lstrip("-").isdigit():
-            try:
-                amount = int(parts[0])
-            except:
-                await message.channel.send("❌ Montant invalide.")
-                return
+
+        cartes_scored = []
+        for carte in CARTES:
+            s = fuzzy_score(carte_query, carte["nom"])
+            if s >= 0.4:
+                cartes_scored.append((s, carte))
+        cartes_scored.sort(key=lambda x: x[0], reverse=True)
+        top = cartes_scored[:3]
+
+        if not top:
+            await message.channel.send(f"❌ Aucune carte ressemblant à **{carte_query}** trouvée.")
+            return
+
+        if top[0][0] >= 0.95:
+            found_carte = top[0][1]
         else:
-            await message.channel.send("❌ Format invalide.\nEx: `!give @membre 500` • `!give @membre role:Rôle Gold`")
+            emojis = ["1️⃣", "2️⃣", "3️⃣"]
+            lignes = []
+            for i, (s, carte) in enumerate(top):
+                rarete_info = RARETES.get(carte["rarete"], {})
+                emoji_r = rarete_info.get("emoji", "❓")
+                label_r = rarete_info.get("label", carte["rarete"])
+                lignes.append(f"{emojis[i]} {emoji_r} **{carte['nom']}** — *{label_r}*")
+
+            embed = discord.Embed(
+                title="🔍 Quelle carte voulais-tu dire ?",
+                description="\n".join(lignes),
+                color=0xf39c12
+            )
+            embed.set_footer(text="Réagis avec le numéro • ❌ pour annuler • Expire dans 30s")
+            bot_msg = await message.channel.send(embed=embed)
+            for i in range(len(top)):
+                await bot_msg.add_reaction(emojis[i])
+            await bot_msg.add_reaction("❌")
+
+            emoji = await wait_reaction(message.channel, message.author.id, bot_msg, emojis[:len(top)] + ["❌"])
+            if emoji is None or emoji == "❌":
+                await bot_msg.edit(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))
+                return
+            found_carte = top[emojis.index(emoji)][1]
+
+        # Confirmation
+        rarete_info = RARETES.get(found_carte["rarete"], {})
+        rarete_color = rarete_info.get("couleur", 0x3498db)
+        rarete_emoji = rarete_info.get("emoji", "❓")
+        rarete_label = rarete_info.get("label", found_carte["rarete"])
+
+        confirm_embed = discord.Embed(
+            title="⚠️ Confirmer le don de carte",
+            description=(
+                f"Donner la carte **{found_carte['nom']}** à {target.mention} ?\n\n"
+                f"{rarete_emoji} *{rarete_label}* — {found_carte['description']}"
+            ),
+            color=rarete_color
+        )
+        confirm_embed.set_thumbnail(url=target.display_avatar.url)
+        confirm_embed.set_image(url=found_carte.get("image_url", ""))
+        confirm_embed.set_footer(text="✅ confirmer • ❌ annuler • Expire dans 30s")
+        confirm_msg = await message.channel.send(embed=confirm_embed)
+        await confirm_msg.add_reaction("✅")
+        await confirm_msg.add_reaction("❌")
+
+        emoji = await wait_reaction(message.channel, message.author.id, confirm_msg, ["✅", "❌"])
+        if emoji is None or emoji == "❌":
+            await confirm_msg.edit(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))
             return
-    if amount <= 0:
-        await message.channel.send("❌ Le montant doit être supérieur à 0.")
+
+        # Ajout de la carte à l'inventaire
+        db = load_db()
+        data = get_member_data(db, target.id)
+        data.setdefault("cartes", []).append({
+            "id": found_carte["id"],
+            "nom": found_carte["nom"],
+            "rarete": found_carte["rarete"]
+        })
+        save_db(db)
+
+        await confirm_msg.edit(embed=discord.Embed(
+            title="🎴 Carte donnée !",
+            description=(
+                f"{rarete_emoji} **{found_carte['nom']}** a été ajoutée à l'inventaire de {target.mention} !\n"
+                f"*{rarete_label}*"
+            ),
+            color=rarete_color
+        ))
+        from utils import log_action
+        await log_action(message.guild, "give_carte", message.author, target,
+                         extra={"Carte": found_carte["nom"], "Rareté": rarete_label})
         return
-    db = load_db()
-    data = get_member_data(db, target.id)
-    data["coins"] += amount
-    save_db(db)
-    embed = discord.Embed(
-        title="🪙 Pièces données !",
-        description=f"**{amount:,}** 🪙 ont été ajoutées au compte de {target.mention}\nNouveau solde : **{data['coins']:,}** 🪙",
-        color=0xf1c40f
-    )
+
+    # ── Rien reconnu ────────────────────────────────────────
+    await message.channel.send(embed=discord.Embed(
+        title="❓ Usage de !give",
+        description=(
+            "`!give @membre 500` — donne des pièces\n"
+            "`!give @membre coins:500` — donne des pièces\n"
+            "`!give @membre role NomDuRole` — donne un rôle (fuzzy)\n"
+            "`!give @membre carte NomDeLaCarte` — donne une carte (fuzzy)"
+        ),
+        color=0x3498db
+    ))
     embed.set_thumbnail(url=target.display_avatar.url)
     await message.channel.send(embed=embed)
     await log_action(message.guild, "give_coins", message.author, target, extra={"Pièces": f"+{amount}", "Solde": data["coins"]})

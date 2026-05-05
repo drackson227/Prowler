@@ -35,6 +35,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.reactions = True
+intents.moderation = True  # ✅ Pour détecter les actions Discord natives
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
@@ -306,6 +307,68 @@ async def on_member_join(member):
 @bot.event
 async def on_member_remove(member):
     await log_action(member.guild, "leave", None, member)
+
+@bot.event
+async def on_audit_log_entry_create(entry):
+    # Ignorer les actions du bot lui-même pour éviter les doublons
+    if entry.user and entry.user.id == bot.user.id:
+        return
+
+    guild = entry.guild
+    moderator = entry.user
+    target = entry.target
+    reason = entry.reason or "Aucune raison spécifiée"
+
+    labels = {
+        "ban": "🔨 Bannissement (Discord)",
+        "kick": "👢 Kick (Discord)",
+        "unban": "✅ Déban (Discord)",
+        "mute": "🔇 Mute (Discord)",
+        "unmute": "🔊 Demute (Discord)",
+    }
+    colors = {
+        "ban": 0xe74c3c, "kick": 0xe67e22, "unban": 0x2ecc71,
+        "mute": 0xf39c12, "unmute": 0x2ecc71,
+    }
+
+    action = None
+    if entry.action == discord.AuditLogAction.ban:
+        action = "ban"
+    elif entry.action == discord.AuditLogAction.kick:
+        action = "kick"
+    elif entry.action == discord.AuditLogAction.unban:
+        action = "unban"
+    elif entry.action == discord.AuditLogAction.member_update:
+        timed_out_after = getattr(entry.after, "timed_out_until", None)
+        timed_out_before = getattr(entry.before, "timed_out_until", None)
+        if timed_out_after and not timed_out_before:
+            action = "mute"
+        elif not timed_out_after and timed_out_before:
+            action = "unmute"
+
+    if not action:
+        return
+
+    log_ch = get_channel_by_name(guild, "logs")
+    if not log_ch:
+        return
+
+    embed = discord.Embed(
+        title=labels.get(action, action),
+        color=colors.get(action, 0x95a5a6),
+        timestamp=datetime.now(timezone.utc)
+    )
+    if target and hasattr(target, "display_avatar"):
+        embed.set_thumbnail(url=target.display_avatar.url)
+        embed.add_field(name="Utilisateur", value=f"{target.mention} (`{target.id}`)", inline=True)
+    elif target:
+        embed.add_field(name="Utilisateur", value=f"`{target.id}`", inline=True)
+    if moderator:
+        embed.add_field(name="Modérateur", value=f"{moderator.mention}", inline=True)
+    if action not in ["unmute", "unban"]:
+        embed.add_field(name="Raison", value=reason, inline=False)
+    embed.set_footer(text="Action effectuée directement sur Discord")
+    await log_ch.send(embed=embed)
 
 @bot.event
 async def on_reaction_add(reaction, user):

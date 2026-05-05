@@ -253,7 +253,7 @@ async def cmd_boutique(message):
         rarity_labels = {"légendaire": "🌟 Légendaire", "épique": "💜 Épique", "rare": "💙 Rare", "commun": "⬜ Commun"}
         gacha_embed = discord.Embed(
             title="🎰 Gacha — Rôles disponibles",
-            description=f"Prix : **{GACHA_COST}** 🪙 par spin\nUtilise `!spin` pour tenter ta chance !",
+            description=f"Prix : **{GACHA_COST}** 🪙 par spin\nUtilise `!rolespin` pour tenter ta chance !",
             color=0xf1c40f
         )
         for item in gacha_items:

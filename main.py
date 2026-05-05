@@ -19,7 +19,7 @@ from utils import (
     has_permission, find_member, get_channel_by_name,
     log_action, reformulate_reason, update_boost, check_spam
 )
-if content_lower in ["!boutique", "!spin", "!cardspin"] or content_lower.startswith(("!acheter", "!équiper")):
+from economy import add_xp_and_coins, cmd_profil, cmd_inventaire, cmd_boutique, cmd_acheter, cmd_equiper, cmd_spin, cmd_classement, cmd_daily, cmd_parrainer
 from shop import rotate_shop, load_shop
 from moderation import (
     show_profile, execute_action, send_confirmation, ask_action_choice,

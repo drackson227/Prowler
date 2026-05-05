@@ -408,6 +408,13 @@ async def on_reaction_add(reaction, user):
             pending_actions.pop(msg_id)
             await reaction.message.channel.send(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))
 
+@client.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    await client.process_commands(message)
+
     from utils import check_spam
     channel_name = normalize_name(message.channel.name)
     content = message.content.strip()
@@ -499,17 +506,13 @@ async def on_reaction_add(reaction, user):
         if spammed:
             return
 
-    # ── DÉTECTION D'INTENTION ──────────────────────────────────
-    # Si le modo n'attend pas de réponse en cours (raison, commentaire),
-    # on vérifie que le message est bien une commande avant de le traiter.
     already_waiting = (
         message.author.id in waiting_for_reason or
         message.author.id in waiting_for_comment
     )
     if not already_waiting:
         if not await is_moderation_command(content):
-            return  # "probablement noir" → ignoré silencieusement ✅
-    # ──────────────────────────────────────────────────────────────
+            return
 
     action_data = None
     try:
@@ -557,7 +560,7 @@ async def on_reaction_add(reaction, user):
         return
     if action_data.get("needs_clarification"):
         await message.channel.send(f"❓ {action_data.get('clarification_question')}")
-        return process_commands
+        return
 
     exact, similar, is_id, is_banned = await find_member(message.guild, action_data.get("target", ""), message.channel)
     await handle_member_resolution(message.channel, action_data, message.author.id, exact, similar, is_id, is_banned)

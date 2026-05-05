@@ -29,17 +29,15 @@ BOOST_INACTIVE = 360
 
 SHOP_ROTATE_INTERVAL = 10800
 GACHA_COST = 50
-
 STREAK_MULTIPLIERS = {3: 1.5, 7: 2.0, 14: 2.5, 30: 3.0}
 DAILY_BASE_COINS = 50
 
+AI_MODEL = "mistralai/mistral-7b-instruct:free"
+
 SYSTEM_PROMPT = """Tu es un assistant de modération Discord.
 À partir d'un message en langage naturel, tu dois extraire l'action de modération voulue et retourner un JSON.
-
 Actions possibles: ban, kick, mute, warn, delete_messages, unmute, unban, show_profile, none
-
 show_profile : quand le modérateur veut voir le profil, les infos, ou revoir un membre.
-
 Format de réponse JSON uniquement (pas de texte autour) :
 {
   "action": "ban|kick|mute|warn|delete_messages|unmute|unban|show_profile|none",
@@ -50,7 +48,6 @@ Format de réponse JSON uniquement (pas de texte autour) :
   "needs_clarification": false,
   "clarification_question": null
 }
-
 Si la cible n'est pas claire, mets needs_clarification à true.
 Si aucune action de modération n'est détectée, mets action à "none".
 """
@@ -58,7 +55,6 @@ Si aucune action de modération n'est détectée, mets action à "none".
 REASON_PROMPT = """Tu es un assistant de modération Discord.
 Reformule la raison donnée par un modérateur en une raison officielle, courte et professionnelle.
 Réponds UNIQUEMENT avec la raison reformulée, rien d'autre, pas de guillemets.
-
 Exemples :
 - "il est raciste" → "Comportement raciste"
 - "spam" → "Spam répété"
@@ -72,7 +68,6 @@ Donne une appréciation courte (3-5 lignes max) mentionnant :
 - S'il insulte souvent ou non
 - Son niveau d'activité dans les discussions
 - Une appréciation globale
-
 Réponds en français, de façon concise et professionnelle."""
 
 ACTION_COLORS = {

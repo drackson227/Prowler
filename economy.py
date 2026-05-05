@@ -42,6 +42,7 @@ async def add_xp_and_coins(member, guild, xp_gain, coin_gain):
     data["level"] = new_level
     save_db(db)
     if new_level > old_level:
+        if data.get("levelup_notif", True):
         try:
             embed = discord.Embed(
                 title="🎉 Level Up !",

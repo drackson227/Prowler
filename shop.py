@@ -12,6 +12,10 @@ DEFAULT_SHOP = {
         {"id": "role_vert",       "name": "Rôle Vert",              "type": "role_color",      "price": 200, "duration": None},
         {"id": "role_violet",     "name": "Rôle Violet",            "type": "role_color",      "price": 200, "duration": None},
         {"id": "role_orange",     "name": "Rôle Orange",            "type": "role_color",      "price": 200, "duration": None},
+        {"id": "role_lgbt",       "name": "Rôle LGBT",              "type": "role_color",      "price": 200, "duration": None},
+        {"id": "role_egirl",      "name": "Rôle eGirl",             "type": "role_color",      "price": 150, "duration": None},
+        {"id": "role_eboy",       "name": "Rôle eBoy",              "type": "role_color",      "price": 150, "duration": None},
+        {"id": "role_danger",     "name": "Rôle Danger de la Société", "type": "role_color",   "price": 500, "duration": None},
         {"id": "role_bleu_temp",  "name": "Rôle Bleu (1 semaine)",  "type": "role_color_temp", "price": 80,  "duration": 7},
         {"id": "role_rouge_temp", "name": "Rôle Rouge (1 semaine)", "type": "role_color_temp", "price": 80,  "duration": 7},
     ],
@@ -41,6 +45,8 @@ ROLE_COLORS_HEX = {
     "role_turquoise": 0x40e0d0, "role_corail": 0xff6b6b, "role_rose": 0xff69b4,
     "role_noir": 0x2c2f33, "role_gold": 0xffd700, "role_arc_en_ciel": 0x9b59b6,
     "role_bleu_temp": 0x3498db, "role_rouge_temp": 0xe74c3c,
+    "role_lgbt": 0xFF69B4, "role_egirl": 0xFF1493,
+    "role_eboy": 0x00BFFF, "role_danger": 0xFF4500,
 }
 
 def load_shop():

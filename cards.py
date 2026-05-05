@@ -44,13 +44,20 @@ def tirer_carte():
     cartes_dispo = [c for c in CARTES if c["rarete"] == rarete_tiree]
     return random.choice(cartes_dispo) if cartes_dispo else random.choice(CARTES)
 
-def build_frame_animation(frame_num: int) -> str:
+def build_frame_animation(frame_num: int, carte_rarete: str = None) -> str:
     rarete_keys = list(RARETES.keys())
-    slots = []
-    for _ in range(3):
-        r = random.choice(rarete_keys)
-        info = RARETES[r]
-        slots.append(f"{info['emoji']} **{info['label']}**")
+    
+    # Dernier frame : les 3 slots affichent la rareté droppée
+    if frame_num == 4 and carte_rarete:
+        info = RARETES[carte_rarete]
+        slots = [f"{info['emoji']} **{info['label']}**"] * 3
+    else:
+        slots = []
+        for _ in range(3):
+            r = random.choice(rarete_keys)
+            info = RARETES[r]
+            slots.append(f"{info['emoji']} **{info['label']}**")
+    
     indicateur = ["⬛⬛⬛", "🟥⬛⬛", "🟥🟥⬛", "🟥🟥🟥", "✅✅✅"][min(frame_num, 4)]
     return f"╔══════════════════╗\n║  {slots[0]}\n║  {slots[1]}\n║  {slots[2]}\n╚══════════════════╝\n{indicateur}"
 
@@ -87,6 +94,9 @@ class Cards(commands.Cog):
             membre["coins"] -= PRIX_SPIN
             save_db(db)
 
+            carte = tirer_carte()
+            rarete_info = RARETES[carte["rarete"]]
+
             embed_anim = discord.Embed(
                 title="🎴 Card Spin — En cours...",
                 description=build_frame_animation(0),
@@ -95,13 +105,15 @@ class Cards(commands.Cog):
             embed_anim.set_footer(text=f"Coût : {PRIX_SPIN} pièces • Solde restant : {membre['coins']} pièces")
             msg = await ctx.send(embed=embed_anim)
 
-            for i in range(1, 5):
+            for i in range(1, 4):
                 await asyncio.sleep(0.8)
                 embed_anim.description = build_frame_animation(i)
                 await msg.edit(embed=embed_anim)
 
-            carte = tirer_carte()
-            rarete_info = RARETES[carte["rarete"]]
+            await asyncio.sleep(0.8)
+            embed_anim.color = rarete_info["couleur"]
+            embed_anim.description = build_frame_animation(4, carte["rarete"])
+            await msg.edit(embed=embed_anim)
 
             db = load_db()
             membre = get_member_data(db, ctx.author.id)

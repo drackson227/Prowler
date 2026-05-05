@@ -547,6 +547,17 @@ async def on_message(message):
         if content_lower == "!inventaire": await cmd_inventaire(message); return
         if content_lower == "!classement": await cmd_classement(message); return
         if content_lower.startswith("!parrainer"): await cmd_parrainer(message, content[10:].strip()); return
+        if content_lower == "!levelup":
+    db = load_db()
+    data = get_member_data(db, message.author.id)
+    current = data.get("levelup_notif", True)
+    data["levelup_notif"] = not current
+    save_db(db)
+    if data["levelup_notif"]:
+        await message.channel.send("✅ Notifications de level up **activées** ! Tu recevras un MP à chaque niveau.")
+    else:
+        await message.channel.send("🔕 Notifications de level up **désactivées** ! Tu ne recevras plus de MP.")
+    return
         if content_lower in ["!boutique", "!rolespin", "!cardspin"] or content_lower.startswith(("!acheter", "!équiper")):
             boutique_ch = get_channel_by_name(message.guild, "boutique")
             if boutique_ch:

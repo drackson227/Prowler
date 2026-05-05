@@ -1,7 +1,7 @@
 import os
 import json
 
-DB_FILE = "/data/db.json"  # ← seul changement, était "db.json"
+DB_FILE = "/data/db.json"
 
 def load_db():
     if os.path.exists(DB_FILE):
@@ -21,13 +21,17 @@ def get_member_data(db, member_id):
             "warns": 0, "total_warns": 0, "mutes": 0, "kicks": 0,
             "bans": 0, "spam_mute_count": 0, "comments": [], "sanctions": [],
             "xp": 0, "level": 0, "coins": 0, "inventory": [], "equipped": [],
-            "daily_streak": 0, "last_daily": None, "godfather": None, "subscriptions": []
+            "daily_streak": 0, "last_daily": None, "godfather": None,
+            "subscriptions": [], "cartes": []
         }
-    for key, default in [
-        ("xp", 0), ("level", 0), ("coins", 0), ("inventory", []),
-        ("equipped", []), ("daily_streak", 0), ("last_daily", None),
-        ("godfather", None), ("subscriptions", [])
-    ]:
+    defaults = {
+        "xp": 0, "level": 0, "coins": 0, "inventory": [], "equipped": [],
+        "daily_streak": 0, "last_daily": None, "godfather": None,
+        "subscriptions": [], "cartes": [], "spam_mute_count": 0,
+        "warns": 0, "total_warns": 0, "mutes": 0, "kicks": 0, "bans": 0,
+        "comments": [], "sanctions": []
+    }
+    for key, default in defaults.items():
         if key not in db[mid]:
             db[mid][key] = default
     return db[mid]

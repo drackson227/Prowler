@@ -73,6 +73,7 @@ async def send_help(channel):
             "`!profil` — voir ton niveau, pièces, rôles équipés\n"
             "`!inventaire` — voir tous tes rôles achetés\n"
             "`!classement` — top des membres les plus actifs\n\n"
+            "`!levelup` — activer/désactiver les notifs de level up en MP\n"
             "**Cartes**\n"
             "`!collection` — voir ta collection de cartes\n"
             "`!collection @pseudo` — voir la collection d'un autre\n"

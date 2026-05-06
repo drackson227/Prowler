@@ -574,6 +574,12 @@ async def update_active_roles_loop():
 @client.event
 async def on_ready():
     print(f"✅ {client.user} connecté !")
+    client.loop.create_task(daily_report_loop())
+    client.loop.create_task(update_active_roles_loop())
+    client.loop.create_task(shop_rotate_loop())
+    print("✅ Bot prêt !")
+
+async def setup_hook():
     for ext in ["cards", "trades", "voc", "tickets", "casino", "imposteur"]:
         try:
             await client.load_extension(ext)
@@ -584,13 +590,7 @@ async def on_ready():
         synced = await client.tree.sync()
         print(f"✅ {len(synced)} slash commands synchronisées")
     except Exception as e:
-        print(f"❌ Erreur sync slash commands : {e}")
-    client.loop.create_task(daily_report_loop())
-    client.loop.create_task(update_active_roles_loop())
-    client.loop.create_task(shop_rotate_loop())
-    # BUG FIX #2 : "await bot.tree.sync()" → supprimé (bot n'existe pas, double sync inutile)
-    # et le print était hors de la fonction (IndentationError silencieux)
-    print("✅ Bot prêt !")
+        print(f"❌ Erreur sync : {e}")
 
 @client.event
 async def on_member_join(member):

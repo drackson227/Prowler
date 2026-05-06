@@ -1,831 +1,1133 @@
-# casino.py — Blackjack, Dice, Gacha Duel
-
 import discord
 from discord.ext import commands
 from discord import app_commands
 import asyncio
-import random
-from datetime import datetime, timezone
+import json
+import unicodedata
+from datetime import datetime, timezone, timedelta
+from openai import OpenAI
+from collections import Counter
+
+from config import (
+    DISCORD_TOKEN, OPENROUTER_API_KEY, SYSTEM_PROMPT,
+    ROLE_MEMBRE, ROLE_MEMBRE_ACTIF, ACTIVE_MESSAGES_PER_DAY,
+    ACTIVE_DAYS_REQUIRED, INACTIVE_DAYS_REQUIRED,
+    XP_PER_MESSAGE, COINS_PER_MESSAGE, COINS_BOOST,
+    BOOST_INTERVAL, BOOST_INACTIVE, REPORT_HOUR
+)
 from db import load_db, save_db, get_member_data
-from utils import get_channel_by_name
+from utils import (
+    has_permission, find_member, get_channel_by_name,
+    get_log_channel, log_action, reformulate_reason, update_boost, check_spam
+)
+from economy import (
+    add_xp_and_coins, cmd_profil, cmd_inventaire, cmd_boutique,
+    cmd_acheter, cmd_equiper, cmd_spin, cmd_classement, cmd_daily,
+    cmd_parrainer, get_level_from_xp
+)
+from shop import rotate_shop, load_shop
+from moderation import (
+    show_profile, execute_action, send_confirmation, ask_action_choice,
+    handle_member_resolution, cmd_give, is_moderation_command,
+    pending_actions, waiting_for_reason, waiting_for_member_choice,
+    waiting_for_action_choice, waiting_for_comment, mod_commands_log
+)
 
-SALON_CASINO = "casino"
+# ─────────────────────────────────────────────────────────────
+# FIX #1 : AI_MODEL importé depuis config pour cohérence
+# ─────────────────────────────────────────────────────────────
+from config import AI_MODEL
 
-RARETES_ORDRE = ["shlag", "commun", "rare", "epique", "hallal", "legendaire", "mythique", "secret"]
-RARETES_POINTS = {
-    "shlag": 1, "commun": 2, "rare": 3, "epique": 10,
-    "hallal": 15, "legendaire": 25, "mythique": 50, "secret": 100
-}
-RARETES_EMOJI = {
-    "secret": "🌈", "mythique": "🔴", "legendaire": "🟡",
-    "hallal": "🟢", "epique": "🟣", "rare": "🔵", "commun": "⚪", "shlag": "⚫"
-}
-RARETES_PROBA = [
-    ("shlag", 31.5), ("commun", 26), ("rare", 18.5), ("epique", 13),
-    ("hallal", 7.5), ("legendaire", 2), ("mythique", 1), ("secret", 0.5)
-]
+ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 
-SUITS = ["♥", "♦", "♠", "♣"]
-RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.reactions = True
+intents.voice_states = True
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
+client = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+member_message_days = {}
 
-def check_casino_channel(channel, guild):
-    name = channel.name.lower().replace("・", "").replace("-", "")
-    if "casino" not in name:
-        casino_ch = get_channel_by_name(guild, "casino")
-        mention = casino_ch.mention if casino_ch else "🎰・casino"
-        return False, mention
-    return True, None
+# ── VOICE COINS ──────────────────────────────────────────────────────────────
+voice_timers = {}
+voice_start_time = {}
+VOICE_COINS_PER_MINUTE = 2
+VOICE_XP_PER_MINUTE = 0
 
-def new_deck():
-    deck = [f"{r}{s}" for r in RANKS for s in SUITS]
-    random.shuffle(deck)
-    return deck
+# ── SHADOW BAN ────────────────────────────────────────────────────────────────
+shadow_banned = {}
 
-def card_value(card):
-    r = card[:-1]
-    if r in ["J", "Q", "K"]: return 10
-    if r == "A": return 11
-    return int(r)
+def normalize_name(s):
+    s = s.lower().replace("・", "")
+    return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("ascii")
 
-def hand_value(hand):
-    total = sum(card_value(c) for c in hand)
-    aces = sum(1 for c in hand if c[:-1] == "A")
-    while total > 21 and aces:
-        total -= 10
-        aces -= 1
-    return total
+# ─────────────────────────────────────────────────────────────
+# FIX #2 : FakeMessage centralisé — évite la duplication dans
+#           chaque slash command et assure que channel.send()
+#           est correctement intercepté
+# ─────────────────────────────────────────────────────────────
+class FakeMessage:
+    """
+    Proxy d'un discord.Message pour réutiliser les commandes préfixées
+    dans les slash commands. Capture les envois via interaction.followup.
+    """
+    def __init__(self, interaction: discord.Interaction):
+        self.author   = interaction.user
+        self.guild    = interaction.guild
+        self.channel  = _FakeChannel(interaction)
+        self.mentions = []
 
-def format_hand(hand, hide_second=False):
-    def display_card(card):
-        rank = card[:-1]
-        suit = card[-1]
-        return f"10{suit}" if rank in ["J", "Q", "K"] else card
-    if hide_second and len(hand) >= 2:
-        return f"{display_card(hand[0])} 🂠"
-    return " ".join(display_card(c) for c in hand)
+class _FakeChannel:
+    """
+    Simule discord.TextChannel.send() → redirige vers followup.
+    Supporte aussi les méthodes utilisées par les commandes économie.
+    """
+    def __init__(self, interaction: discord.Interaction):
+        self._interaction = interaction
+        self.name = interaction.channel.name if interaction.channel else "unknown"
+        # Attribut requis par cmd_inventaire pour wait_for
+        self._state = interaction.channel._state
 
-def tirage_gacha():
-    roll = random.uniform(0, 100)
-    cumul = 0
-    for rarete, proba in RARETES_PROBA:
-        cumul += proba
-        if roll <= cumul:
-            return rarete
-    return "commun"
-
-async def log_casino(guild, action, user, details, gain=0):
-    ch = get_channel_by_name(guild, "casino-logs")
-    if not ch:
-        return
-    color = 0x2ECC71 if gain > 0 else (0xE74C3C if gain < 0 else 0xF1C40F)
-    embed = discord.Embed(
-        title=f"🎰 {action}", color=color,
-        timestamp=datetime.now(timezone.utc)
-    )
-    embed.add_field(name="Joueur", value=user.mention, inline=True)
-    embed.add_field(name="Gain/Perte", value=f"{'+' if gain > 0 else ''}{gain} 🪙", inline=True)
-    embed.add_field(name="Détails", value=details, inline=False)
-    await ch.send(embed=embed)
-
-def get_or_init_bj(data):
-    if "blackjack" not in data:
-        data["blackjack"] = {
-            "total_parties": 0, "wins": 0, "winrate": 0.0,
-            "pot_net": 0, "best_hand": 0, "hot_streak": 0, "current_streak": 0
-        }
-    return data["blackjack"]
-
-def get_or_init_dice(data):
-    if "dice" not in data:
-        data["dice"] = {"total": 0, "wins": 0, "losses": 0}
-    return data["dice"]
-
-def get_or_init_duel(data):
-    if "duel_stats" not in data:
-        data["duel_stats"] = {
-            "wins": 0, "losses": 0, "winrate": 0.0,
-            "pot_won": 0, "total_duels": 0, "best_win": ""
-        }
-    return data["duel_stats"]
-
-def build_bj_embed(title, color, mise, bankroll, main_joueur, main_croupier,
-                   score_j=None, hide_croupier=True, footer=""):
-    """Construit un embed Blackjack proprement sans toucher _fields."""
-    embed = discord.Embed(title=f"🎰 BLACKJACK — {title}", color=color)
-    embed.add_field(name="💰 Mise", value=f"{mise} 🪙", inline=True)
-    embed.add_field(name="💳 Bankroll", value=f"{bankroll} 🪙", inline=True)
-    if main_joueur:
-        sj = score_j if score_j is not None else hand_value(main_joueur)
-        embed.add_field(
-            name="🃏 Tes cartes",
-            value=f"{format_hand(main_joueur)} **[{sj}]**",
-            inline=False
-        )
-    if main_croupier:
-        if hide_croupier:
-            embed.add_field(
-                name="🤖 Croupier",
-                value=f"{format_hand(main_croupier, hide_second=True)} **[??]**",
-                inline=False
-            )
-        else:
-            sc = hand_value(main_croupier)
-            embed.add_field(
-                name="🤖 Croupier",
-                value=f"{format_hand(main_croupier)} **[{sc}]**",
-                inline=False
-            )
-    if footer:
-        embed.set_footer(text=footer)
-    return embed
-
-
-# ─── Cog ─────────────────────────────────────────────────────────────────────
-
-class Casino(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-        self.en_jeu = set()
-        self.en_duel = set()
-        self.dice_cooldowns = {}
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # RÈGLES
-    # ══════════════════════════════════════════════════════════════════════════
-
-    @app_commands.command(name="regles-blackjack", description="📖 Règles et guide du Blackjack")
-    async def regles_blackjack(self, interaction: discord.Interaction):
-        embed = discord.Embed(title="🃏 Règles du Blackjack", color=0xF1C40F)
-        embed.add_field(name="🎯 Objectif",
-            value="Avoir une main **plus proche de 21** que le croupier, **sans dépasser 21**.", inline=False)
-        embed.add_field(name="🃏 Valeur des cartes",
-            value="• **2 à 10** → valeur faciale\n• **J, Q, K** → **10**\n• **As (A)** → **11** (ou 1 si ça évite le bust)", inline=False)
-        embed.add_field(name="⚡ Actions",
-            value="• ✅ **HIT** — tirer une carte\n• ❌ **STAND** — rester\n• ⚡ **DOUBLE** — doubler la mise + une seule carte", inline=False)
-        embed.add_field(name="🏆 Résultats",
-            value="• **Blackjack (21 dès le départ)** → x2.5 🏆\n• **Victoire** → x2 ✅\n• **Égalité** → remboursé 🤝\n• **Bust (>21)** → perdu 💥", inline=False)
-        embed.add_field(name="🤖 Croupier", value="Tire jusqu'à **17 ou plus**.", inline=False)
-        embed.add_field(name="🎰 Tables",
-            value="`/blackjack-low [mise]` — 10–100 🪙 🟢\n`/blackjack-high [mise]` — 500–5 000 🪙 🟡\n`/blackjack-vip [mise]` — 10 000+ 🪙 🔴 *(Modos)*", inline=False)
-        embed.set_footer(text="Prowler Bot • /help dans #casino pour toutes les commandes")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="regles-dice", description="📖 Règles du jeu de dés")
-    async def regles_dice(self, interaction: discord.Interaction):
-        embed = discord.Embed(title="🎲 Règles du Dice — Double ou Rien", color=0x3498DB)
-        embed.add_field(name="🎯 Objectif", value="Lancer un dé et obtenir une valeur **plus haute** que le bot.", inline=False)
-        embed.add_field(name="⚙️ Comment jouer",
-            value="1. `/dice [mise]` — 10 à 1 000 🪙\n2. Toi et le bot lancez un dé (1 à 6)\n3. Le plus haut score gagne !", inline=False)
-        embed.add_field(name="🏆 Résultats",
-            value="• **Ton dé > bot** → **+mise** 🪙\n• **Égalité** → mise conservée\n• **Ton dé < bot** → **-mise** 🪙", inline=False)
-        embed.add_field(name="⏱️ Cooldown", value="10 secondes entre chaque partie.", inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="regles-duel", description="📖 Règles du Gacha Duel")
-    async def regles_duel(self, interaction: discord.Interaction):
-        embed = discord.Embed(title="⚔️ Règles du Gacha Duel", color=0x9B59B6)
-        embed.add_field(name="🎯 Objectif", value="Défier un joueur — chacun tire une rareté. La meilleure rareté gagne le pot !", inline=False)
-        embed.add_field(name="⚙️ Comment jouer",
-            value="1. `/gacha-duel @adversaire [mise]` — 25 à 500 🪙\n2. L'adversaire accepte dans les 30s ✅\n3. Chacun tire une rareté → la plus haute gagne le pot !", inline=False)
-        embed.add_field(name="🃏 Raretés",
-            value="🌈 **Secret** 100pts • 🔴 **Mythique** 50pts • 🟡 **Légendaire** 25pts\n🟢 **Hallal** 15pts • 🟣 **Épique** 10pts • 🔵 **Rare** 3pts\n⚪ **Commun** 2pts • ⚫ **Shlag** 1pt", inline=False)
-        embed.add_field(name="⚖️ Égalité", value="Un dé départage les deux joueurs.", inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # BLACKJACK — logique principale
-    # ══════════════════════════════════════════════════════════════════════════
-
-    async def _blackjack(self, channel, player, mise, table_name, mise_min, mise_max):
-        # ── Vérifications ──
-        ok, mention = check_casino_channel(channel, player.guild)
-        if not ok:
-            await channel.send(f"{player.mention} ❌ Blackjack **uniquement** dans {mention} !")
-            return
-        if player.id in self.en_jeu:
-            await channel.send(f"{player.mention} ❌ Tu as déjà une partie en cours !")
-            return
-        if not (mise_min <= mise <= mise_max):
-            await channel.send(
-                f"{player.mention} ❌ Mise invalide pour la table **{table_name}**.\n"
-                f"Min : **{mise_min} 🪙** • Max : **{mise_max} 🪙**"
-            )
-            return
-
-        db = load_db()
-        data = get_member_data(db, player.id)
-        if data["coins"] < mise:
-            await channel.send(
-                f"{player.mention} ❌ Solde insuffisant. "
-                f"Tu as **{data['coins']} 🪙**, il faut **{mise} 🪙**."
-            )
-            return
-
-        self.en_jeu.add(player.id)
-        data["coins"] -= mise
-        save_db(db)
-
+    async def send(self, content=None, **kwargs):
         try:
-            deck = new_deck()
-            main_joueur = [deck.pop(), deck.pop()]
-            main_croupier = [deck.pop(), deck.pop()]
-            bankroll = data["coins"]
+            return await self._interaction.followup.send(content or "", **kwargs)
+        except discord.HTTPException:
+            # followup déjà consommé ou expiré — on ignore silencieusement
+            pass
 
-            # ── Deal initial ──
-            embed = build_bj_embed(
-                table_name, 0xF1C40F, mise, bankroll,
-                main_joueur, main_croupier,
-                hide_croupier=True,
-                footer="Deal en cours..."
-            )
-            msg = await channel.send(f"{player.mention}", embed=embed)
-            await asyncio.sleep(1)
+    async def add_reaction(self, emoji):
+        pass  # Pas de support natif en slash
 
-            score_j = hand_value(main_joueur)
+    async def clear_reactions(self):
+        pass
 
-            # ── Blackjack naturel ──
-            if score_j == 21:
-                gain = int(mise * 2.5)
-                db = load_db()
-                data = get_member_data(db, player.id)
-                bj = get_or_init_bj(data)
-                bj["total_parties"] += 1
-                bj["wins"] += 1
-                bj["winrate"] = round(bj["wins"] / bj["total_parties"] * 100, 1)
-                bj["pot_net"] += gain - mise
-                bj["best_hand"] = 21
-                bj["current_streak"] += 1
-                bj["hot_streak"] = max(bj["hot_streak"], bj["current_streak"])
-                data["coins"] += gain
-                save_db(db)
-                embed = build_bj_embed(
-                    table_name, 0xF1C40F, mise, data["coins"],
-                    main_joueur, main_croupier,
-                    hide_croupier=False,
-                    footer=f"🏆 BLACKJACK ! +{gain} 🪙 (5:2)"
-                )
-                await msg.edit(content=f"{player.mention} 🎉 **BLACKJACK !**", embed=embed)
-                await log_casino(player.guild, "Blackjack", player, f"BLACKJACK — {table_name}", gain - mise)
-                await self._check_bj_roles(player, bj)
-                return
 
-            # ── Tour du joueur ──
-            doubled = False
-            while True:
-                score_j = hand_value(main_joueur)
-                db_check = load_db()
-                data_check = get_member_data(db_check, player.id)
-                can_double = data_check["coins"] >= mise and not doubled
+# ============================================================
+# VOICE COINS
+# ============================================================
+async def voice_coins_loop(member):
+    while True:
+        await asyncio.sleep(60)
+        # FIX #3 : vérification robuste — member.voice peut devenir None entre deux await
+        try:
+            if member.voice and not member.voice.self_mute and not member.voice.self_deaf:
+                await add_xp_and_coins(member, member.guild, VOICE_XP_PER_MINUTE, VOICE_COINS_PER_MINUTE)
+            elif not member.voice:
+                break
+        except Exception:
+            break
 
-                embed = build_bj_embed(
-                    table_name, 0xF1C40F, mise, data_check["coins"],
-                    main_joueur, main_croupier,
-                    score_j=score_j, hide_croupier=True,
-                    footer="✅ HIT (carte) • ❌ STAND" + (" • ⚡ DOUBLE" if can_double else "")
-                )
-                await msg.edit(embed=embed)
-                await msg.clear_reactions()
-                await msg.add_reaction("✅")
-                await msg.add_reaction("❌")
-                if can_double:
-                    await msg.add_reaction("⚡")
+@client.event
+async def on_voice_state_update(member, before, after):
+    if member.bot:
+        return
+    uid = member.id
 
-                def check(r, u):
-                    valid = ["✅", "❌"] + (["⚡"] if can_double else [])
-                    return u == player and r.message.id == msg.id and str(r.emoji) in valid
+    joined  = after.channel and (not before.channel or before.channel != after.channel)
+    left    = before.channel and (not after.channel or after.channel != before.channel)
 
+    if joined:
+        voice_start_time[uid] = datetime.now(timezone.utc)
+        if uid in voice_timers:
+            voice_timers[uid].cancel()
+        voice_timers[uid] = asyncio.create_task(voice_coins_loop(member))
+
+    elif left:
+        if uid in voice_timers:
+            voice_timers[uid].cancel()
+            del voice_timers[uid]
+        if uid in voice_start_time:
+            duree_min = (datetime.now(timezone.utc) - voice_start_time[uid]).total_seconds() / 60
+            coins = int(duree_min * VOICE_COINS_PER_MINUTE)
+            if coins > 0:
+                await add_xp_and_coins(member, member.guild, 0, coins)
                 try:
-                    reaction, _ = await self.bot.wait_for("reaction_add", timeout=60, check=check)
-                except asyncio.TimeoutError:
-                    embed = build_bj_embed(
-                        table_name, 0x95A5A6, mise, data_check["coins"],
-                        main_joueur, main_croupier,
-                        hide_croupier=False, footer="⌛ Partie expirée — mise perdue."
-                    )
-                    await msg.edit(content=f"{player.mention} ⌛ Temps écoulé.", embed=embed)
-                    await msg.clear_reactions()
-                    await log_casino(player.guild, "Blackjack", player, "Timeout — mise perdue", -mise)
-                    return
+                    await member.send(f"🎤 **+{coins} 🪙** pour **{int(duree_min)} min** passées en vocal !")
+                except Exception:
+                    pass
+            del voice_start_time[uid]
 
-                action = str(reaction.emoji)
-                await msg.clear_reactions()
 
-                # ── DOUBLE ──
-                if action == "⚡":
-                    db2 = load_db()
-                    data2 = get_member_data(db2, player.id)
-                    data2["coins"] -= mise
-                    save_db(db2)
-                    mise *= 2
-                    doubled = True
-                    main_joueur.append(deck.pop())
-                    score_j = hand_value(main_joueur)
+# ============================================================
+# SHADOW BAN
+# ============================================================
+async def shadow_ban_user(guild, moderator, target):
+    db = load_db()
+    data = get_member_data(db, target.id)
+    data["shadow_banned"]    = True
+    data["shadow_ban_since"] = datetime.now(timezone.utc).isoformat()
+    data["shadow_ban_count"] = data.get("shadow_ban_count", 0) + 1
+    save_db(db)
+    shadow_banned[target.id] = {"since": datetime.now(timezone.utc), "blocked": 0, "spam_score": 0}
 
-                    if score_j > 21:
-                        embed = build_bj_embed(
-                            table_name, 0xE74C3C, mise, data2["coins"] ,
-                            main_joueur, main_croupier,
-                            score_j=score_j, hide_croupier=False,
-                            footer=f"💥 BUST après DOUBLE ! Perdu {mise} 🪙"
-                        )
-                        await msg.edit(content=f"{player.mention} 💥 **BUST !**", embed=embed)
-                        await self._fin_bj(player, False, mise, score_j)
-                        await log_casino(player.guild, "Blackjack", player, f"Bust après double [{score_j}]", -mise)
-                        return
-                    # Après double → on stand automatiquement
-                    break
-
-                # ── HIT ──
-                if action == "✅":
-                    main_joueur.append(deck.pop())
-                    score_j = hand_value(main_joueur)
-                    if score_j > 21:
-                        db3 = load_db()
-                        data3 = get_member_data(db3, player.id)
-                        embed = build_bj_embed(
-                            table_name, 0xE74C3C, mise, data3["coins"],
-                            main_joueur, main_croupier,
-                            score_j=score_j, hide_croupier=False,
-                            footer=f"💥 BUST ! Perdu {mise} 🪙"
-                        )
-                        await msg.edit(content=f"{player.mention} 💥 **BUST !**", embed=embed)
-                        await msg.clear_reactions()
-                        await self._fin_bj(player, False, mise, score_j)
-                        await log_casino(player.guild, "Blackjack", player, f"Bust [{score_j}]", -mise)
-                        return
-                    if score_j == 21:
-                        break  # Stand automatique à 21
-                    continue
-
-                # ── STAND ──
-                if action == "❌":
-                    break
-
-            # ── Tour du croupier ──
-            score_j = hand_value(main_joueur)
-            while hand_value(main_croupier) < 17:
-                main_croupier.append(deck.pop())
-            score_c = hand_value(main_croupier)
-
-            db_final = load_db()
-            data_final = get_member_data(db_final, player.id)
-
-            if score_c > 21 or score_j > score_c:
-                # Victoire
-                gain = mise * 2
-                embed = build_bj_embed(
-                    table_name, 0x2ECC71, mise, data_final["coins"] + gain,
-                    main_joueur, main_croupier,
-                    score_j=score_j, hide_croupier=False,
-                    footer=f"🏆 VICTOIRE ! +{mise} 🪙"
-                )
-                await msg.edit(content=f"{player.mention} 🏆 **Victoire !**", embed=embed)
-                await self._fin_bj(player, True, mise, score_j, gain)
-                await log_casino(player.guild, "Blackjack", player, f"Win [{score_j}] vs croupier [{score_c}]", mise)
-
-            elif score_j == score_c:
-                # Égalité
-                data_final["coins"] += mise
-                save_db(db_final)
-                embed = build_bj_embed(
-                    table_name, 0x95A5A6, mise, data_final["coins"],
-                    main_joueur, main_croupier,
-                    score_j=score_j, hide_croupier=False,
-                    footer="🤝 ÉGALITÉ — Mise remboursée"
-                )
-                await msg.edit(content=f"{player.mention} 🤝 **Égalité !**", embed=embed)
-                await log_casino(player.guild, "Blackjack", player, f"Push [{score_j}]", 0)
-
-            else:
-                # Défaite
-                embed = build_bj_embed(
-                    table_name, 0xE74C3C, mise, data_final["coins"],
-                    main_joueur, main_croupier,
-                    score_j=score_j, hide_croupier=False,
-                    footer=f"❌ Perdu {mise} 🪙"
-                )
-                await msg.edit(content=f"{player.mention} ❌ **Perdu !**", embed=embed)
-                await self._fin_bj(player, False, mise, score_j)
-                await log_casino(player.guild, "Blackjack", player, f"Loss [{score_j}] vs croupier [{score_c}]", -mise)
-
-            await msg.clear_reactions()
-
-        finally:
-            self.en_jeu.discard(player.id)
-
-    async def _fin_bj(self, player, win, mise, score, gain=0):
-        db = load_db()
-        data = get_member_data(db, player.id)
-        bj = get_or_init_bj(data)
-        bj["total_parties"] += 1
-        if win:
-            bj["wins"] += 1
-            data["coins"] += gain
-            bj["pot_net"] += gain - mise
-            bj["current_streak"] += 1
-            bj["hot_streak"] = max(bj["hot_streak"], bj["current_streak"])
-        else:
-            bj["pot_net"] -= mise
-            bj["current_streak"] = 0
-        bj["winrate"] = round(bj["wins"] / bj["total_parties"] * 100, 1)
-        bj["best_hand"] = max(bj.get("best_hand", 0), score)
-        save_db(db)
-        await self._check_bj_roles(player, bj)
-
-    async def _check_bj_roles(self, player, bj):
-        guild = player.guild
-        roles_a_donner = []
-        if bj["winrate"] >= 60 and bj["total_parties"] >= 10:
-            roles_a_donner.append("🃏 Card Shark")
-        if bj["total_parties"] >= 100:
-            roles_a_donner.append("🎰 Pro Gambler")
-        if bj["pot_net"] >= 5000:
-            roles_a_donner.append("💎 High Roller")
-        for rname in roles_a_donner:
-            role = discord.utils.get(guild.roles, name=rname)
-            if role and role not in player.roles:
-                try: await player.add_roles(role)
-                except: pass
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # TABLES BLACKJACK — slash commands
-    # ══════════════════════════════════════════════════════════════════════════
-
-    @app_commands.command(name="blackjack-low", description="🟢 Blackjack Table Low (10–100 🪙)")
-    @app_commands.describe(mise="Ta mise (10 à 100 pièces)")
-    async def bj_low(self, interaction: discord.Interaction, mise: int):
-        await interaction.response.defer(ephemeral=True)
-        ok, mention = check_casino_channel(interaction.channel, interaction.guild)
-        if not ok:
-            await interaction.followup.send(f"❌ Blackjack **uniquement** dans {mention} !", ephemeral=True)
-            return
-        if not (10 <= mise <= 100):
-            await interaction.followup.send(f"❌ Mise invalide — table Low : **10 à 100 🪙**.", ephemeral=True)
-            return
-        await interaction.followup.send("🎰 Lancement...", ephemeral=True)
-        await self._blackjack(interaction.channel, interaction.user, mise, "🟢 Low", 10, 100)
-
-    @app_commands.command(name="blackjack-high", description="🟡 Blackjack Table High (500–5000 🪙)")
-    @app_commands.describe(mise="Ta mise (500 à 5000 pièces)")
-    async def bj_high(self, interaction: discord.Interaction, mise: int):
-        await interaction.response.defer(ephemeral=True)
-        ok, mention = check_casino_channel(interaction.channel, interaction.guild)
-        if not ok:
-            await interaction.followup.send(f"❌ Blackjack **uniquement** dans {mention} !", ephemeral=True)
-            return
-        if not (500 <= mise <= 5000):
-            await interaction.followup.send(f"❌ Mise invalide — table High : **500 à 5 000 🪙**.", ephemeral=True)
-            return
-        db = load_db()
-        data = get_member_data(db, interaction.user.id)
-        bj = data.get("blackjack", {})
-        total_parties = bj.get("total_parties", 0)
-        winrate = bj.get("winrate", 0)
-        if total_parties >= 10 and winrate < 50:
-            await interaction.followup.send(
-                f"❌ Table High réservée aux joueurs avec **50%+ winrate**.\n"
-                f"Ton winrate : **{winrate}%** sur **{total_parties}** parties.",
-                ephemeral=True
-            )
-            return
-        await interaction.followup.send("🎰 Vérification OK, lancement...", ephemeral=True)
-        await self._blackjack(interaction.channel, interaction.user, mise, "🟡 High", 500, 5000)
-
-    @app_commands.command(name="blackjack-vip", description="🔴 Blackjack Table VIP (10 000+ 🪙) — Modos")
-    @app_commands.describe(mise="Ta mise (10 000+ pièces)")
-    @app_commands.default_permissions(manage_roles=True)
-    async def bj_vip(self, interaction: discord.Interaction, mise: int):
-        await interaction.response.defer(ephemeral=True)
-        ok, mention = check_casino_channel(interaction.channel, interaction.guild)
-        if not ok:
-            await interaction.followup.send(f"❌ Blackjack **uniquement** dans {mention} !", ephemeral=True)
-            return
-        if mise < 10000:
-            await interaction.followup.send(f"❌ Mise minimum : **10 000 🪙** pour la table VIP.", ephemeral=True)
-            return
-        await interaction.followup.send("🎰 Lancement VIP...", ephemeral=True)
-        await self._blackjack(interaction.channel, interaction.user, mise, "🔴 VIP", 10000, 999999)
-
-    @app_commands.command(name="blackjack-stats", description="📊 Tes statistiques Blackjack")
-    async def bj_stats(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        db = load_db()
-        data = get_member_data(db, interaction.user.id)
-        bj = get_or_init_bj(data)
-        embed = discord.Embed(title="🎰 Tes stats Blackjack", color=0xF1C40F)
-        embed.set_thumbnail(url=interaction.user.display_avatar.url)
-        embed.add_field(name="🎲 Parties", value=str(bj["total_parties"]), inline=True)
-        embed.add_field(name="🏆 Victoires", value=str(bj["wins"]), inline=True)
-        embed.add_field(name="📊 Winrate", value=f"{bj['winrate']}%", inline=True)
-        embed.add_field(name="💰 Net", value=f"{bj['pot_net']:+} 🪙", inline=True)
-        embed.add_field(name="🔥 Hot streak max", value=str(bj["hot_streak"]), inline=True)
-        embed.add_field(name="🃏 Meilleure main", value=str(bj["best_hand"]), inline=True)
-        total_parties = bj["total_parties"]
-        winrate = bj["winrate"]
-        if total_parties < 10:
-            embed.add_field(name="🟡 Table High", value=f"Encore **{10 - total_parties}** partie(s) avant activation.", inline=False)
-        elif winrate >= 50:
-            embed.add_field(name="🟡 Table High", value="✅ Accès débloqué !", inline=False)
-        else:
-            embed.add_field(name="🟡 Table High", value=f"❌ Bloqué — {winrate}% < 50%", inline=False)
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # DICE
-    # ══════════════════════════════════════════════════════════════════════════
-
-    async def _dice(self, channel, player, mise):
-        ok, mention = check_casino_channel(channel, player.guild)
-        if not ok:
-            await channel.send(f"{player.mention} ❌ Dice **uniquement** dans {mention} !")
-            return
-        if not (10 <= mise <= 1000):
-            await channel.send(f"{player.mention} ❌ Mise entre **10 et 1 000 🪙**.")
-            return
-
-        now = asyncio.get_event_loop().time()
-        last = self.dice_cooldowns.get(player.id, 0)
-        if now - last < 10:
-            remaining = 10 - int(now - last)
-            await channel.send(f"{player.mention} ⏳ Cooldown — attends **{remaining}s**.")
-            return
-
-        db = load_db()
-        data = get_member_data(db, player.id)
-        if data["coins"] < mise:
-            await channel.send(f"{player.mention} ❌ Solde insuffisant (**{data['coins']} 🪙**).")
-            return
-
-        self.dice_cooldowns[player.id] = now
-        de_joueur = random.randint(1, 6)
-        de_bot = random.randint(1, 6)
-        win = de_joueur > de_bot
-
-        db = load_db()
-        data = get_member_data(db, player.id)
-        dice_s = get_or_init_dice(data)
-        dice_s["total"] += 1
-        if win:
-            data["coins"] += mise
-            dice_s["wins"] += 1
-        elif de_joueur < de_bot:
-            data["coins"] -= mise
-            dice_s["losses"] += 1
-        save_db(db)
-
-        faces = ["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"]
-        color = 0x2ECC71 if win else (0xF1C40F if de_joueur == de_bot else 0xE74C3C)
-        embed = discord.Embed(title="🎲 DOUBLE OU RIEN", color=color)
-        embed.add_field(name="💰 Mise", value=f"{mise} 🪙", inline=True)
-        embed.add_field(name="🎲 Toi", value=f"{faces[de_joueur-1]} **{de_joueur}**", inline=True)
-        embed.add_field(name="🤖 Bot", value=f"{faces[de_bot-1]} **{de_bot}**", inline=True)
-        if win:
-            embed.set_footer(text=f"✅ VICTOIRE ! +{mise} 🪙 → Solde : {data['coins']} 🪙")
-        elif de_joueur == de_bot:
-            embed.set_footer(text=f"🤝 Égalité — Mise conservée → Solde : {data['coins']} 🪙")
-        else:
-            embed.set_footer(text=f"❌ Perdu {mise} 🪙 → Solde : {data['coins']} 🪙")
-        await channel.send(f"{player.mention}", embed=embed)
-        await log_casino(player.guild, "Dice", player, f"{de_joueur} vs {de_bot}",
-                         mise if win else (-mise if de_joueur < de_bot else 0))
-
-    @app_commands.command(name="dice", description="🎲 Double ou rien ! Dé vs Bot (10–1000 🪙)")
-    @app_commands.describe(mise="Ta mise (10 à 1000 pièces)")
-    async def slash_dice(self, interaction: discord.Interaction, mise: int):
-        await interaction.response.defer(ephemeral=True)
-        ok, mention = check_casino_channel(interaction.channel, interaction.guild)
-        if not ok:
-            await interaction.followup.send(f"❌ Dice **uniquement** dans {mention} !", ephemeral=True)
-            return
-        if not (10 <= mise <= 1000):
-            await interaction.followup.send(f"❌ Mise entre **10 et 1 000 🪙**.", ephemeral=True)
-            return
-        await interaction.followup.send("🎲 Lancement des dés...", ephemeral=True)
-        await self._dice(interaction.channel, interaction.user, mise)
-
-    @commands.command(name="dice")
-    async def cmd_dice(self, ctx, mise: int):
-        await self._dice(ctx.channel, ctx.author, mise)
-
-    @app_commands.command(name="mystats", description="📊 Tes stats Dice")
-    async def slash_mystats(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        db = load_db()
-        data = get_member_data(db, interaction.user.id)
-        d = get_or_init_dice(data)
-        wr = round(d["wins"] / d["total"] * 100, 1) if d["total"] > 0 else 0
-        embed = discord.Embed(title="🎲 Tes stats Dice", color=0x3498DB)
-        embed.set_thumbnail(url=interaction.user.display_avatar.url)
-        embed.add_field(name="🎲 Parties", value=str(d["total"]), inline=True)
-        embed.add_field(name="✅ Victoires", value=str(d["wins"]), inline=True)
-        embed.add_field(name="❌ Défaites", value=str(d["losses"]), inline=True)
-        embed.add_field(name="📊 Winrate", value=f"{wr}%", inline=True)
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # GACHA DUEL
-    # ══════════════════════════════════════════════════════════════════════════
-
-    @app_commands.command(name="gacha-duel", description="⚔️ Duel Gacha — Meilleure rareté gagne le pot !")
-    @app_commands.describe(adversaire="Ton adversaire", mise="Mise (25–500 🪙)")
-    async def slash_gacha_duel(self, interaction: discord.Interaction, adversaire: discord.Member, mise: int):
-        await interaction.response.defer(ephemeral=True)
-
-        channel = interaction.channel
-        joueur = interaction.user
-
-        ok, mention = check_casino_channel(channel, joueur.guild)
-        if not ok:
-            await interaction.followup.send(f"❌ Gacha Duel **uniquement** dans {mention} !", ephemeral=True)
-            return
-        if adversaire.bot or adversaire == joueur:
-            await interaction.followup.send("❌ Adversaire invalide.", ephemeral=True)
-            return
-        if not (25 <= mise <= 500):
-            await interaction.followup.send("❌ Mise entre **25 et 500 🪙**.", ephemeral=True)
-            return
-        if joueur.id in self.en_duel or adversaire.id in self.en_duel:
-            await interaction.followup.send("❌ L'un de vous est déjà en duel.", ephemeral=True)
-            return
-
-        db = load_db()
-        dj = get_member_data(db, joueur.id)
-        da = get_member_data(db, adversaire.id)
-        if dj["coins"] < mise:
-            await interaction.followup.send(f"❌ Solde insuffisant ({dj['coins']} 🪙).", ephemeral=True)
-            return
-        if da["coins"] < mise:
-            await interaction.followup.send(
-                f"❌ {adversaire.display_name} n'a que **{da['coins']} 🪙**.", ephemeral=True
-            )
-            return
-
-        await interaction.followup.send(f"⚔️ Duel lancé contre {adversaire.mention} !", ephemeral=True)
-
-        # Proposition publique
-        embed_ch = discord.Embed(
-            title="🎰 CASINO DUEL",
-            description=(
-                f"⚔️ {joueur.mention} défie {adversaire.mention} !\n"
-                f"💰 Mise : **{mise} 🪙** chacun\n"
-                f"🏆 **POT : {mise * 2} 🪙**"
-            ),
-            color=0xF1C40F
+    report_ch = get_channel_by_name(guild, "rapport-prowler")
+    if report_ch:
+        embed = discord.Embed(
+            title="🕵️ SHADOW MODE ACTIF",
+            color=0x2C2C2C,
+            timestamp=datetime.now(timezone.utc)
         )
-        embed_ch.set_footer(text="✅ Accepter • ❌ Refuser — 30s")
-        msg = await channel.send(f"{adversaire.mention} — Tu es défié !", embed=embed_ch)
-        await msg.add_reaction("✅")
+        embed.add_field(name="👤 Cible",       value=f"{target.mention} [SHADOW #{data['shadow_ban_count']}]", inline=True)
+        embed.add_field(name="👮 Modérateur",  value=moderator.mention, inline=True)
+        embed.add_field(name="📊 Statut",      value="0 msg bloqués | Score spam 0%", inline=False)
+        msg = await report_ch.send(embed=embed)
+        await msg.add_reaction("👁️")
         await msg.add_reaction("❌")
 
-        def check_conf(r, u):
-            return u == adversaire and r.message.id == msg.id and str(r.emoji) in ["✅", "❌"]
+async def shadow_unban_user(guild, target_id):
+    db = load_db()
+    data = get_member_data(db, target_id)
+    data["shadow_banned"] = False
+    save_db(db)
+    shadow_banned.pop(target_id, None)
 
-        try:
-            reaction, _ = await self.bot.wait_for("reaction_add", timeout=30, check=check_conf)
-        except asyncio.TimeoutError:
-            await msg.edit(content=f"{adversaire.mention} ⌛ Duel expiré.", embed=None)
-            await msg.clear_reactions()
-            return
 
-        if str(reaction.emoji) == "❌":
-            await msg.edit(content=f"{adversaire.mention} ❌ Duel refusé.", embed=None)
-            await msg.clear_reactions()
-            return
+# ============================================================
+# AUTO-APPEAL IA
+# ============================================================
+async def auto_appeal_check(guild, banned_user):
+    db   = load_db()
+    data = db.get(str(banned_user.id), {})
+    sanctions       = data.get("sanctions", [])
+    total_warns     = data.get("total_warns", 0)
+    bans_count      = data.get("bans", 0)
 
-        self.en_duel.add(joueur.id)
-        self.en_duel.add(adversaire.id)
-        try:
-            db = load_db()
-            get_member_data(db, joueur.id)["coins"] -= mise
-            get_member_data(db, adversaire.id)["coins"] -= mise
-            save_db(db)
+    score_injuste = 100
+    if total_warns > 3:  score_injuste -= 20
+    if total_warns > 6:  score_injuste -= 20
+    if bans_count  > 1:  score_injuste -= 30
+    recent_sanctions = [s for s in sanctions if s.get("type") in ["spam_mute", "mute"]]
+    if len(recent_sanctions) > 2: score_injuste -= 15
+    score_injuste = max(10, min(95, score_injuste))
 
-            # Animation
-            frames = [
-                "⏳ Chargement du duel...",
-                "🟥▓▓ Spin en cours...",
-                "🟥🟥🟥 Dernières secondes...",
-                "✨ Révélation !"
-            ]
-            embed_anim = discord.Embed(title="⚔️ DUEL GACHA EN COURS", color=0x9B59B6)
-            embed_anim.set_footer(text=frames[0])
-            await msg.edit(content=f"{joueur.mention} {adversaire.mention}", embed=embed_anim)
-            for frame in frames[1:]:
-                await asyncio.sleep(1)
-                embed_anim.set_footer(text=frame)
-                await msg.edit(embed=embed_anim)
+    recommandation = "Unban + surveillance" if score_injuste >= 60 else "Maintenir le ban"
+    couleur        = 0x2ECC71 if score_injuste >= 60 else 0xE74C3C
 
-            rarete_j = tirage_gacha()
-            rarete_a = tirage_gacha()
-            pts_j = RARETES_POINTS[rarete_j]
-            pts_a = RARETES_POINTS[rarete_a]
-
-            # Déterminer le gagnant
-            if pts_j > pts_a:
-                gagnant, perdant = joueur, adversaire
-                rarete_g, rarete_p = rarete_j, rarete_a
-                pts_g, pts_p = pts_j, pts_a
-            elif pts_a > pts_j:
-                gagnant, perdant = adversaire, joueur
-                rarete_g, rarete_p = rarete_a, rarete_j
-                pts_g, pts_p = pts_a, pts_j
-            else:
-                # Égalité → dé
-                de_j, de_a = random.randint(1, 6), random.randint(1, 6)
-                while de_j == de_a:
-                    de_j, de_a = random.randint(1, 6), random.randint(1, 6)
-                if de_j > de_a:
-                    gagnant, perdant = joueur, adversaire
-                    rarete_g, rarete_p = rarete_j, rarete_a
-                    pts_g, pts_p = pts_j, pts_a
-                else:
-                    gagnant, perdant = adversaire, joueur
-                    rarete_g, rarete_p = rarete_a, rarete_j
-                    pts_g, pts_p = pts_a, pts_j
-
-            pot = mise * 2
-            db = load_db()
-            get_member_data(db, gagnant.id)["coins"] += pot
-
-            for uid, win in [(str(joueur.id), gagnant == joueur), (str(adversaire.id), gagnant == adversaire)]:
-                ds = get_or_init_duel(db[uid])
-                ds["total_duels"] += 1
-                if win:
-                    ds["wins"] += 1
-                    ds["pot_won"] += pot
-                else:
-                    ds["losses"] += 1
-                ds["winrate"] = round(ds["wins"] / ds["total_duels"] * 100, 1)
-            save_db(db)
-
-            embed_res = discord.Embed(
-                title=f"🏆 {gagnant.display_name} GAGNE !",
-                color=0x2ECC71
-            )
-            embed_res.add_field(
-                name=f"🥇 {gagnant.display_name}",
-                value=f"{RARETES_EMOJI[rarete_g]} **{rarete_g.upper()}** ({pts_g} pts)",
-                inline=True
-            )
-            embed_res.add_field(
-                name=f"💀 {perdant.display_name}",
-                value=f"{RARETES_EMOJI[rarete_p]} **{rarete_p.upper()}** ({pts_p} pts)",
-                inline=True
-            )
-            embed_res.set_footer(text=f"💰 +{pot} 🪙 pour {gagnant.display_name}")
-            await msg.edit(
-                content=f"{gagnant.mention} 🎉 **Victoire !** {perdant.mention}",
-                embed=embed_res
-            )
-            await msg.clear_reactions()
-            await log_casino(joueur.guild, "Gacha Duel", gagnant,
-                             f"vs {perdant.display_name} — {rarete_g} > {rarete_p}", pot - mise)
-            await self._check_duel_roles(gagnant, db[str(gagnant.id)]["duel_stats"])
-
-        finally:
-            self.en_duel.discard(joueur.id)
-            self.en_duel.discard(adversaire.id)
-
-    async def _check_duel_roles(self, player, ds):
-        guild = player.guild
-        roles_map = [
-            ("total_duels", 50, "Dueliste 🗡️"),
-            ("winrate", 60, "Champion 👑"),
-            ("pot_won", 5000, "Whale 🐋")
-        ]
-        for key, seuil, rname in roles_map:
-            if ds.get(key, 0) >= seuil:
-                role = discord.utils.get(guild.roles, name=rname)
-                if role and role not in player.roles:
-                    try: await player.add_roles(role)
-                    except: pass
-
-    @app_commands.command(name="top-duel", description="🏆 Leaderboard des duels Gacha")
-    async def slash_top_duel(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        db = load_db()
-        data_list = []
-        for mid, data in db.items():
-            m = interaction.guild.get_member(int(mid))
-            if m and "duel_stats" in data:
-                ds = data["duel_stats"]
-                if ds["total_duels"] >= 5:
-                    data_list.append((m.display_name, ds["winrate"], ds["total_duels"], ds["pot_won"]))
-        data_list.sort(key=lambda x: x[1], reverse=True)
-        medals = ["🥇", "🥈", "🥉"] + [f"{i}." for i in range(4, 11)]
-        lines = [
-            f"{medals[i]} **{n}** — {wr}% ({t} duels) • {p} 🪙 gagnés"
-            for i, (n, wr, t, p) in enumerate(data_list[:10])
-        ]
-        embed = discord.Embed(
-            title="⚔️ Top Duels Gacha",
-            description="\n".join(lines) if lines else "Aucun duel (5 minimum requis).",
-            color=0x9B59B6
+    try:
+        await banned_user.send(
+            f"🤖 **Auto-Appeal Prowler Bot**\n\n"
+            f"Ton ban a été analysé automatiquement.\n"
+            f"📊 **Score IA : {score_injuste}% potentiellement injuste**\n"
+            f"Une révision par les modérateurs est en cours.\n"
+            f"Résultat dans **3h** maximum."
         )
-        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception:
+        pass
+
+    report_ch = get_channel_by_name(guild, "rapport-prowler")
+    if not report_ch:
+        return
+
+    embed = discord.Embed(title="🤖 AUTO-APPEAL", color=couleur, timestamp=datetime.now(timezone.utc))
+    embed.set_thumbnail(url=banned_user.display_avatar.url)
+    embed.add_field(name="👤 Utilisateur",  value=f"{banned_user} (ID: {banned_user.id})", inline=True)
+    embed.add_field(name="📊 Score IA",     value=f"**{score_injuste}% injuste**",         inline=True)
+    embed.add_field(
+        name="📝 Historique",
+        value=f"⚠️ Warns : {total_warns} | 🔇 Mutes : {len(recent_sanctions)} | 🔨 Bans : {bans_count}",
+        inline=False
+    )
+    embed.add_field(name="✅ Recommandation", value=recommandation, inline=False)
+    embed.set_footer(text="✅ Unban • ❌ Refuser • ℹ️ Profil")
+    msg = await report_ch.send(embed=embed)
+    await msg.add_reaction("✅")
+    await msg.add_reaction("❌")
+    await msg.add_reaction("ℹ️")
 
 
-async def setup(bot):
-    await bot.add_cog(Casino(bot))
+# ============================================================
+# HELP
+# ============================================================
+async def send_help(channel):
+    channel_name = normalize_name(channel.name)
+    embed = discord.Embed(color=0x3498db, timestamp=datetime.now(timezone.utc))
+
+    VOC_SECTION = (
+        "\n\n**🎙️ Salons vocaux (depuis n'importe quel salon)**\n"
+        "`!createvoc NomDuSalon` — créer un salon vocal temporaire\n"
+        "`!vockick @m` • `!vocmute @m` • `!vocunmute @m`\n"
+        "`!voclock` • `!vocunlock` • `!vocrename Nom` • `!vocsuppr`"
+    )
+
+    if "cmds-" in channel_name:
+        embed.title = "📖 Ton salon vocal privé 🎙️"
+        embed.description = (
+            "Ces commandes sont utilisables **depuis n'importe quel salon** :\n\n"
+            "`!vockick @membre` — expulser un membre\n"
+            "`!vocmute @membre` — muter un membre\n"
+            "`!vocunmute @membre` — démuter un membre\n"
+            "`!voclock` — fermer le salon aux nouveaux\n"
+            "`!vocunlock` — rouvrir le salon\n"
+            "`!vocrename NouveauNom` — renommer le salon\n"
+            "`!vocsuppr` — supprimer le salon"
+        )
+    elif "jeux" in channel_name:
+        embed.title = "📖 Commandes — 🎮・jeux"
+        embed.description = (
+            "**Profil & Stats**\n"
+            "`!profil` / `/profil [@membre]` — niveau, XP, pièces\n"
+            "`!inventaire` / `/inventaire` — rôles achetés\n"
+            "`!classement` / `/classement` — top 10 membres\n"
+            "`/solde` — vérifier ton solde (discret)\n\n"
+            "**Cartes**\n"
+            "`!collection [@pseudo]` — ta collection\n"
+            "`!cartesinfo` — probabilités des raretés\n\n"
+            "**Social**\n"
+            "`!parrainer @pseudo` — parrainer un ami (+100 🪙 chacun)\n\n"
+            "🎤 **+2 🪙/min** en vocal automatiquement !"
+            + VOC_SECTION
+        )
+    elif "boutique" in channel_name:
+        embed.title = "📖 Commandes — 🛍️・boutique"
+        embed.description = (
+            "**Boutique Rôles**\n"
+            "`!boutique` / `/boutique` — voir la boutique\n"
+            "`!acheter [nom]` / `/acheter` — acheter un article\n"
+            "`!équiper [nom]` / `/equiper` — équiper un rôle\n"
+            "`!spin` / `/rolespin` — gacha rôles (50 🪙)\n\n"
+            "**Cartes**\n"
+            "`!cardspin` / `/cardspin` — gacha cartes (100 🪙)\n"
+            "`!cartesinfo` — probabilités des raretés\n\n"
+            "💡 Boutique rotative renouvellement toutes les **3h**"
+            + VOC_SECTION
+        )
+    elif "daily" in channel_name:
+        embed.title = "📖 Commandes — 🎁・daily"
+        embed.description = (
+            "`!daily` / `/daily` — récompense quotidienne\n\n"
+            "🔥 **Streak :** x1.5 (3j) → x2 (7j) → x2.5 (14j) → x3 (30j)\n"
+            "💰 Base : 50 🪙 + 20 XP\n"
+            "⚠️ Un jour manqué → streak repart à **0** !"
+            + VOC_SECTION
+        )
+    elif "trade" in channel_name:
+        embed.title = "📖 Commandes — 🔄・trades"
+        embed.description = (
+            "`!trade @membre` / `/trade` — trade interactif\n"
+            "`!trade @membre give X contre Y` — trade rapide\n"
+            "`!donner @membre [montant]` — donner des pièces\n"
+            "`!collection [@pseudo]` — voir une collection\n\n"
+            "**Modérateurs uniquement :**\n"
+            "`!tradecancel @membre` — débloquer un trade figé"
+            + VOC_SECTION
+        )
+    elif "casino" in channel_name:
+        embed.title = "📖 Commandes — 🎰・casino"
+        embed.description = (
+            "**🃏 Blackjack**\n"
+            "`/blackjack-low [mise]` — Table Low (10–100 🪙)\n"
+            "`/blackjack-high [mise]` — Table High (500–5k 🪙)\n"
+            "`/blackjack-vip [mise]` — VIP Modos (10k+ 🪙)\n"
+            "`/blackjack-stats` — tes stats\n\n"
+            "**🎲 Dice**\n"
+            "`/dice [mise]` — double ou rien (10–1000 🪙)\n\n"
+            "**⚔️ Gacha Duel**\n"
+            "`/gacha-duel @adversaire [mise]` — duel (25–500 🪙)\n"
+            "`/top-duel` — leaderboard duels"
+        )
+    elif "ticket" in channel_name:
+        embed.title = "📖 Commandes — 🎟️・tickets"
+        embed.description = (
+            "Réagis avec **🎫** pour ouvrir un ticket.\n\n"
+            "• Contester une sanction\n"
+            "• Signaler un problème\n"
+            "• Demander de l'aide\n\n"
+            "⚠️ Les membres **mutés** peuvent toujours ouvrir un ticket.\n"
+            "🔒 Les modérateurs ferment le ticket avec **🔒**."
+        )
+    elif "moderation" in channel_name:
+        embed.title = "📖 Commandes — Modération"
+        embed.description = (
+            "Écris en **langage naturel** :\n"
+            "`mute @pseudo 30 minutes` • `ban @pseudo`\n"
+            "`kick @pseudo` • `warn @pseudo`\n"
+            "`unmute @pseudo` • `unban @pseudo`\n"
+            "`supprime les 10 derniers messages de @pseudo`\n"
+            "`profil de @pseudo`\n\n"
+            "**Fondateur uniquement :**\n"
+            "`!give @membre 500` — donner pièces\n"
+            "`!give @membre role NomDuRole` — donner rôle\n\n"
+            "**Shadow Ban :**\n"
+            "`!shadowban @membre` — shadow-ban silencieux\n"
+            "`!shadowunban @membre` — lever le shadow-ban\n\n"
+            "**Trades :**\n"
+            "`!tradecancel @membre` — débloquer un trade figé"
+        )
+    elif "log" in channel_name:
+        embed.title = "📖 Lecture des logs"
+        embed.description = (
+            "🔨 Bans • 👢 Kicks • 🔇 Mutes • ⚠️ Warns\n"
+            "🔊 Demutes • ✅ Débans • 📥 Arrivées • 📤 Départs\n"
+            "💬 Commentaires modos • 🤖 Anti-spam\n"
+            "🛍️ Achats • 🎰 Gacha • 🎁 Daily • 👗 Équipements\n"
+            "🎟️ Tickets • 🔄 Trades • 🕵️ Shadow bans"
+        )
+    else:
+        embed.title = "📖 Aide — Prowler Bot"
+        embed.description = (
+            "🎮・jeux — profil, classement, inventaire, cartes\n"
+            "🛍️・boutique — boutique, gacha rôles & cartes\n"
+            "🎁・daily — récompense quotidienne\n"
+            "🔄・trades — échanges de cartes et dons\n"
+            "🎰・casino — blackjack, dice, gacha duel\n"
+            "🎟️・tickets — contester une sanction\n\n"
+            "🎙️ **Salon vocal privé**\n"
+            "`!createvoc NomDuSalon` — crée un salon vocal **+ un salon textuel privé** automatiquement\n"
+            "→ Le salon texte privé sert à gérer ton vocal (`!voclock`, `!vockick`, etc.)\n"
+            "→ Seuls toi et les membres que tu invites peuvent le voir\n\n"
+            "🎤 **+2 🪙/min** en vocal automatiquement !\n\n"
+            "Tape `?help` dans chaque salon pour les commandes détaillées."
+        )
+
+    embed.set_footer(text="Prowler Bot • ! et / sont tous les deux acceptés")
+    await channel.send(embed=embed)
+
+
+# ============================================================
+# SLASH COMMANDS
+# ============================================================
+
+@client.tree.command(name="profil", description="Affiche ton profil : niveau, XP, pièces, rôle équipé")
+@app_commands.describe(membre="Le membre dont tu veux voir le profil (optionnel)")
+async def slash_profil(interaction: discord.Interaction, membre: discord.Member = None):
+    await interaction.response.defer()
+    target = membre or interaction.user
+    db = load_db()
+    data = get_member_data(db, target.id)
+    level, current_xp, needed_xp = get_level_from_xp(data["xp"])
+    progress     = int((current_xp / needed_xp) * 10) if needed_xp > 0 else 0
+    progress_bar = "█" * progress + "░" * (10 - progress)
+    embed = discord.Embed(title=f"👤 Profil — {target.display_name}", color=0x3498db)
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="⭐ Niveau",       value=str(level),              inline=True)
+    embed.add_field(name="✨ XP",           value=f"{current_xp}/{needed_xp}", inline=True)
+    embed.add_field(name="🪙 Pièces",       value=str(data["coins"]),      inline=True)
+    embed.add_field(name="📊 Progression",  value=f"`{progress_bar}`",     inline=False)
+    embed.add_field(name="🔥 Streak daily", value=f"{data['daily_streak']} jours", inline=True)
+    equipped = data.get("equipped", [])
+    embed.add_field(name="👗 Rôle équipé",  value=", ".join(equipped) if equipped else "Aucun", inline=True)
+    await interaction.followup.send(embed=embed)
+
+
+@client.tree.command(name="solde", description="Vérifie rapidement ton solde de pièces")
+async def slash_solde(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    db   = load_db()
+    data = get_member_data(db, interaction.user.id)
+    await interaction.followup.send(
+        f"🪙 Tu as **{data['coins']} pièces** et **{data['xp']} XP**.",
+        ephemeral=True
+    )
+
+
+@client.tree.command(name="classement", description="Affiche le top 10 des membres les plus actifs")
+async def slash_classement(interaction: discord.Interaction):
+    await interaction.response.defer()
+    db   = load_db()
+    members_data = []
+    for mid, data in db.items():
+        member = interaction.guild.get_member(int(mid))
+        if member:
+            level, _, _ = get_level_from_xp(data.get("xp", 0))
+            members_data.append((member.display_name, level, data.get("xp", 0), data.get("coins", 0)))
+    members_data.sort(key=lambda x: x[2], reverse=True)
+    top    = members_data[:10]
+    medals = ["🥇", "🥈", "🥉"] + ["4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    lines  = [
+        f"{medals[i]} **{name}** — Niv. {level} • {xp} XP • {coins} 🪙"
+        for i, (name, level, xp, coins) in enumerate(top)
+    ]
+    embed = discord.Embed(
+        title="🏆 Classement — Top 10",
+        description="\n".join(lines) if lines else "Aucun membre.",
+        color=0xf1c40f
+    )
+    await interaction.followup.send(embed=embed)
+
+
+# ─────────────────────────────────────────────────────────────
+# FIX #4 : slash_daily — le FakeMessage redirige bien vers followup.
+#           cmd_daily vérifie le nom du channel, on passe le vrai channel
+#           pour que la vérification "daily" fonctionne.
+# ─────────────────────────────────────────────────────────────
+@client.tree.command(name="daily", description="Récupère ta récompense quotidienne")
+async def slash_daily(interaction: discord.Interaction):
+    await interaction.response.defer()
+    fake = FakeMessage(interaction)
+    await cmd_daily(fake)
+
+
+@client.tree.command(name="rolespin", description="Lance le gacha de rôles (50 🪙)")
+async def slash_rolespin(interaction: discord.Interaction):
+    await interaction.response.defer()
+    fake = FakeMessage(interaction)
+    await cmd_spin(fake)
+
+
+@client.tree.command(name="boutique", description="Affiche la boutique")
+async def slash_boutique(interaction: discord.Interaction):
+    await interaction.response.defer()
+    fake = FakeMessage(interaction)
+    await cmd_boutique(fake)
+
+
+@client.tree.command(name="acheter", description="Achète un article de la boutique")
+@app_commands.describe(article="Le nom de l'article à acheter")
+async def slash_acheter(interaction: discord.Interaction, article: str):
+    await interaction.response.defer()
+    fake = FakeMessage(interaction)
+    await cmd_acheter(fake, article)
+
+
+@client.tree.command(name="equiper", description="Équipe un rôle cosmétique de ton inventaire")
+@app_commands.describe(role="Le nom du rôle à équiper")
+async def slash_equiper(interaction: discord.Interaction, role: str):
+    await interaction.response.defer()
+    fake = FakeMessage(interaction)
+    await cmd_equiper(fake, role)
+
+
+@client.tree.command(name="inventaire", description="Affiche ton inventaire")
+async def slash_inventaire(interaction: discord.Interaction):
+    await interaction.response.defer()
+    fake = FakeMessage(interaction)
+    await cmd_inventaire(fake)
+
+
+@client.tree.command(name="notif", description="Active ou désactive les notifications de level up en MP")
+@app_commands.describe(etat="on pour activer, off pour désactiver")
+@app_commands.choices(etat=[
+    app_commands.Choice(name="Activer",    value="on"),
+    app_commands.Choice(name="Désactiver", value="off"),
+])
+async def slash_notif(interaction: discord.Interaction, etat: str):
+    await interaction.response.defer(ephemeral=True)
+    db   = load_db()
+    data = get_member_data(db, interaction.user.id)
+    data["levelup_notif"] = (etat == "on")
+    save_db(db)
+    status = "✅ activées" if etat == "on" else "❌ désactivées"
+    await interaction.followup.send(f"Notifications de level up **{status}**.", ephemeral=True)
+
+
+@client.tree.command(name="help", description="Affiche l'aide des commandes disponibles")
+async def slash_help(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    await send_help(interaction.channel)
+    await interaction.followup.send("✅ Aide envoyée !", ephemeral=True)
+
+
+# ============================================================
+# RAPPORT QUOTIDIEN
+# ============================================================
+async def send_daily_report(guild):
+    report_ch = get_channel_by_name(guild, "rapport-prowler")
+    if not report_ch:
+        return
+    db    = load_db()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    bans, kicks, mutes, warns = [], [], [], []
+
+    for mid, data in db.items():
+        member = guild.get_member(int(mid))
+        name   = member.display_name if member else f"ID:{mid}"
+        for s in data.get("sanctions", []):
+            if s.get("date", "").startswith(today):
+                t      = s.get("type", "")
+                reason = s.get("reason", "—")
+                if t == "ban":               bans.append((name, reason))
+                elif t == "kick":            kicks.append((name, reason))
+                elif t in ["mute","spam_mute"]: mutes.append((name, reason))
+                elif t == "warn":            warns.append((name, reason))
+
+    embed = discord.Embed(
+        title=f"📝 Rapport de modération — {today}",
+        color=0x3498db,
+        timestamp=datetime.now(timezone.utc)
+    )
+
+    def fmt_list(lst):
+        if not lst: return "Aucun"
+        return "\n".join([f"• **{n}** — {r}" for n, r in lst[:10]])
+
+    embed.add_field(name=f"🔨 Bans ({len(bans)})",    value=fmt_list(bans),  inline=False)
+    embed.add_field(name=f"👢 Kicks ({len(kicks)})",   value=fmt_list(kicks), inline=False)
+    embed.add_field(name=f"🔇 Mutes ({len(mutes)})",   value=fmt_list(mutes), inline=False)
+    embed.add_field(name=f"⚠️ Warns ({len(warns)})",   value=fmt_list(warns), inline=False)
+
+    today_cmds = [
+        (t, mod, act, tgt) for t, mod, act, tgt in mod_commands_log
+        if datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m-%d") == today
+    ]
+    if today_cmds:
+        cmd_counts = Counter(f"{mod} → {act}" for _, mod, act, _ in today_cmds)
+        cmd_txt    = "\n".join([f"• **{k}** × {v}" for k, v in cmd_counts.most_common(10)])
+        embed.add_field(name=f"🖱️ Actions modos ({len(today_cmds)})", value=cmd_txt, inline=False)
+
+    if shadow_banned:
+        sb_txt = "\n".join([
+            f"• ID:{uid} — {v['blocked']} msgs bloqués"
+            for uid, v in list(shadow_banned.items())[:5]
+        ])
+        embed.add_field(name=f"🕵️ Shadow bans actifs ({len(shadow_banned)})", value=sb_txt, inline=False)
+
+    embed.set_footer(text="Rapport automatique quotidien")
+    await report_ch.send(embed=embed)
+
+
+# ============================================================
+# LOOPS
+# ============================================================
+async def daily_report_loop():
+    await client.wait_until_ready()
+    while not client.is_closed():
+        now      = datetime.now(timezone.utc)
+        next_run = now.replace(hour=REPORT_HOUR, minute=0, second=0, microsecond=0)
+        if now >= next_run:
+            next_run += timedelta(days=1)
+        await asyncio.sleep((next_run - now).total_seconds())
+        for guild in client.guilds:
+            await send_daily_report(guild)
+
+
+async def shop_rotate_loop():
+    await client.wait_until_ready()
+    from config import SHOP_ROTATE_INTERVAL
+    shop = load_shop()
+    if not shop["rotating"]:
+        rotate_shop()
+    while not client.is_closed():
+        shop = load_shop()
+        last = shop.get("last_rotate")
+        if last:
+            dt          = datetime.fromisoformat(last)
+            next_rotate = dt + timedelta(seconds=SHOP_ROTATE_INTERVAL)
+            wait        = (next_rotate - datetime.now(timezone.utc)).total_seconds()
+            await asyncio.sleep(wait if wait > 0 else SHOP_ROTATE_INTERVAL)
+        else:
+            await asyncio.sleep(SHOP_ROTATE_INTERVAL)
+        new_items = rotate_shop()
+        for guild in client.guilds:
+            boutique_ch = get_channel_by_name(guild, "boutique")
+            if boutique_ch:
+                embed = discord.Embed(
+                    title="🔄 La boutique rotative s'est renouvelée !",
+                    description="\n".join([f"• **{i['name']}** — {i['price']} 🪙" for i in new_items]),
+                    color=0x2ecc71
+                )
+                embed.set_footer(text="!acheter [nom] ou /acheter pour acheter")
+                await boutique_ch.send(embed=embed)
+
+
+async def update_active_roles_loop():
+    await client.wait_until_ready()
+    while not client.is_closed():
+        await asyncio.sleep(3600)
+        for guild in client.guilds:
+            role_actif  = discord.utils.get(guild.roles, name=ROLE_MEMBRE_ACTIF)
+            role_membre = discord.utils.get(guild.roles, name=ROLE_MEMBRE)
+            if not role_actif or not role_membre:
+                continue
+            today = datetime.now(timezone.utc).date()
+            for mid, days_data in list(member_message_days.items()):
+                member = guild.get_member(int(mid))
+                if not member:
+                    continue
+                active_streak = sum(
+                    1 for i in range(ACTIVE_DAYS_REQUIRED)
+                    if days_data.get((today - timedelta(days=i)).isoformat(), 0) >= ACTIVE_MESSAGES_PER_DAY
+                )
+                inactive_streak = sum(
+                    1 for i in range(INACTIVE_DAYS_REQUIRED)
+                    if days_data.get((today - timedelta(days=i)).isoformat(), 0) == 0
+                )
+                has_actif = role_actif in member.roles
+                try:
+                    if active_streak >= ACTIVE_DAYS_REQUIRED and not has_actif:
+                        await member.add_roles(role_actif)
+                        if role_membre in member.roles:
+                            await member.remove_roles(role_membre)
+                    elif inactive_streak >= INACTIVE_DAYS_REQUIRED and has_actif:
+                        await member.remove_roles(role_actif)
+                        if role_membre not in member.roles:
+                            await member.add_roles(role_membre)
+                except Exception:
+                    pass
+
+
+# ============================================================
+# ÉVÉNEMENTS
+# ============================================================
+@client.event
+async def on_ready():
+    print(f"✅ {client.user} connecté !")
+    for ext in ["cards", "trades", "voc", "tickets", "casino", "imposteur"]:
+        try:
+            await client.load_extension(ext)
+            print(f"✅ Extension {ext} chargée")
+        except Exception as e:
+            print(f"❌ Erreur chargement {ext} : {e}")
+    try:
+        synced = await client.tree.sync()
+        print(f"✅ {len(synced)} slash commands synchronisées")
+    except Exception as e:
+        print(f"❌ Erreur sync slash commands : {e}")
+    client.loop.create_task(daily_report_loop())
+    client.loop.create_task(update_active_roles_loop())
+    client.loop.create_task(shop_rotate_loop())
+    print("✅ Bot prêt !")
+
+
+@client.event
+async def on_member_join(member):
+    guild = member.guild
+    role  = discord.utils.get(guild.roles, name=ROLE_MEMBRE)
+    if role:
+        try:
+            await member.add_roles(role)
+        except Exception:
+            pass
+    general = get_channel_by_name(guild, "chat-général")
+    if general:
+        await general.send(f"👋 Bienvenue sur le serveur, {member.mention} !")
+    await log_action(guild, "join", None, member)
+
+
+@client.event
+async def on_member_remove(member):
+    await log_action(member.guild, "leave", None, member)
+
+
+@client.event
+async def on_member_ban(guild, user):
+    # FIX #5 : on_member_ban reçoit (guild, user), pas (member).
+    # Le await asyncio.sleep(2) laisse le ban s'enregistrer avant l'appeal.
+    await asyncio.sleep(2)
+    await auto_appeal_check(guild, user)
+
+
+# ─────────────────────────────────────────────────────────────
+# FIX #6 : on_reaction_add — les vérifications de embed.title
+#           peuvent lever AttributeError si embed est None.
+#           Ajout de guards is None partout.
+# ─────────────────────────────────────────────────────────────
+@client.event
+async def on_reaction_add(reaction, user):
+    if user.bot:
+        return
+    msg_id = reaction.message.id
+    embed  = reaction.message.embeds[0] if reaction.message.embeds else None
+
+    # ── AUTO-APPEAL reactions ──
+    if embed and embed.title and "AUTO-APPEAL" in embed.title:
+        mod_member = reaction.message.guild.get_member(user.id)
+        if not mod_member or not has_permission(mod_member):
+            return
+        for field in embed.fields:
+            if field.value and "ID:" in field.value:
+                try:
+                    uid = int(field.value.split("ID: ")[1].rstrip(")"))
+                    if str(reaction.emoji) == "✅":
+                        try:
+                            await reaction.message.guild.unban(
+                                discord.Object(id=uid), reason="Auto-appeal IA approuvé"
+                            )
+                            await reaction.message.channel.send(
+                                f"✅ Utilisateur (ID: {uid}) débanni suite à l'auto-appeal."
+                            )
+                        except Exception as e:
+                            await reaction.message.channel.send(f"❌ Erreur unban : {e}")
+                    elif str(reaction.emoji) == "❌":
+                        await reaction.message.channel.send(f"❌ Appeal refusé pour ID: {uid}.")
+                except (ValueError, IndexError):
+                    pass
+                break
+
+    # ── waiting_for_action_choice ──
+    if msg_id in waiting_for_action_choice:
+        choice_type, member, action_data, requester_id = waiting_for_action_choice[msg_id]
+
+        if choice_type == "banned_choice":
+            if user.id != requester_id: return
+            waiting_for_action_choice.pop(msg_id, None)
+            if str(reaction.emoji) == "✅":
+                action_data["action"] = "unban"
+                await send_confirmation(reaction.message.channel, action_data, requester_id)
+            elif str(reaction.emoji) == "🔍":
+                db   = load_db()
+                data = get_member_data(db, member.id)
+                embed2 = discord.Embed(
+                    title=f"👤 Profil (banni) — {member.display_name}",
+                    color=0xe74c3c
+                )
+                embed2.set_thumbnail(url=member.display_avatar.url)
+                embed2.add_field(name="🏷️ Pseudo", value=member.name,        inline=True)
+                embed2.add_field(name="🆔 ID",      value=f"`{member.id}`",  inline=True)
+                embed2.add_field(name="⚡ Statut",  value="🔨 **Banni du serveur**", inline=False)
+                embed2.add_field(
+                    name="🛡️ Historique",
+                    value=(
+                        f"⚠️ Warns total : {data['total_warns']}\n"
+                        f"🔇 Mutes : {data['mutes']} | 👢 Kicks : {data['kicks']} | 🔨 Bans : {data['bans']}"
+                    ),
+                    inline=False
+                )
+                await reaction.message.channel.send(embed=embed2)
+            elif str(reaction.emoji) == "❌":
+                await reaction.message.channel.send(
+                    embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6)
+                )
+            return
+
+        if choice_type == "sanction_or_profile":
+            if user.id != requester_id: return
+            waiting_for_action_choice.pop(msg_id)
+            if str(reaction.emoji) == "⚔️":
+                if action_data.get("reason"):
+                    await send_confirmation(reaction.message.channel, action_data, requester_id)
+                else:
+                    await reaction.message.channel.send(
+                        embed=discord.Embed(
+                            title="📝 Raison de la sanction",
+                            description="Quelle est la raison ?",
+                            color=0x3498db
+                        )
+                    )
+                    waiting_for_reason[requester_id] = action_data
+            elif str(reaction.emoji) == "🔍":
+                await show_profile(reaction.message.channel, member, reaction.message.guild)
+            elif str(reaction.emoji) == "❌":
+                await reaction.message.channel.send(
+                    embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6)
+                )
+
+        elif choice_type == "comment_mgmt":
+            mod_member = reaction.message.guild.get_member(user.id)
+            if not mod_member or not has_permission(mod_member): return
+            waiting_for_action_choice.pop(msg_id)
+            if str(reaction.emoji) == "➕":
+                await reaction.message.channel.send(
+                    embed=discord.Embed(
+                        title="💬 Ajouter un commentaire",
+                        description=f"Écris ton commentaire pour **{member.display_name}** :",
+                        color=0x3498db
+                    )
+                )
+                waiting_for_comment[user.id] = (member.id, "add", None)
+            elif str(reaction.emoji) == "➖":
+                db       = load_db()
+                data     = get_member_data(db, member.id)
+                comments = data.get("comments", [])
+                if not comments:
+                    await reaction.message.channel.send("Aucun commentaire à supprimer.")
+                    return
+                emojis_c = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+                embed2   = discord.Embed(title="🗑️ Supprimer un commentaire", color=0xe74c3c)
+                for i, c in enumerate(comments[:5]):
+                    embed2.add_field(name=f"{emojis_c[i]}", value=c, inline=False)
+                cmsg = await reaction.message.channel.send(embed=embed2)
+                for i in range(len(comments[:5])):
+                    await cmsg.add_reaction(emojis_c[i])
+                waiting_for_comment[user.id]      = (member.id, "remove_pick", cmsg.id)
+                waiting_for_action_choice[cmsg.id] = ("comment_remove_pick", member, None, user.id)
+
+        elif choice_type == "comment_remove_pick":
+            if user.id != requester_id: return
+            emojis_c = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+            if str(reaction.emoji) in emojis_c:
+                idx  = emojis_c.index(str(reaction.emoji))
+                db   = load_db()
+                data = get_member_data(db, member.id)
+                comments = data.get("comments", [])
+                if idx < len(comments):
+                    removed = comments.pop(idx)
+                    save_db(db)
+                    waiting_for_action_choice.pop(msg_id, None)
+                    waiting_for_comment.pop(user.id, None)
+                    await reaction.message.channel.send(
+                        embed=discord.Embed(title="✅ Commentaire supprimé", color=0x2ecc71)
+                    )
+                    target = reaction.message.guild.get_member(member.id)
+                    mod_m  = reaction.message.guild.get_member(user.id)
+                    await log_action(
+                        reaction.message.guild, "comment_remove", mod_m, target,
+                        extra={"Commentaire supprimé": removed}
+                    )
+        return
+
+    # ── waiting_for_member_choice ──
+    if msg_id in waiting_for_member_choice:
+        action_data, requester_id, candidates = waiting_for_member_choice[msg_id]
+        if user.id != requester_id: return
+        emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+
+        if str(reaction.emoji) == "✅" and len(candidates) == 1:
+            waiting_for_member_choice.pop(msg_id)
+            action_data["resolved_member"] = candidates[0]
+            await ask_action_choice(reaction.message.channel, candidates[0], action_data, requester_id)
+            return
+        if str(reaction.emoji) == "❌":
+            waiting_for_member_choice.pop(msg_id)
+            await reaction.message.channel.send(
+                embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6)
+            )
+            return
+        if str(reaction.emoji) in emojis:
+            idx = emojis.index(str(reaction.emoji))
+            if idx < len(candidates):
+                waiting_for_member_choice.pop(msg_id)
+                action_data["resolved_member"] = candidates[idx]
+                if action_data.get("action") == "show_profile":
+                    await show_profile(reaction.message.channel, candidates[idx], reaction.message.guild)
+                else:
+                    await ask_action_choice(reaction.message.channel, candidates[idx], action_data, requester_id)
+        return
+
+    # ── pending_actions ──
+    if msg_id in pending_actions:
+        action_data, requester_id = pending_actions[msg_id]
+        if user.id != requester_id: return
+        if str(reaction.emoji) == "✅":
+            pending_actions.pop(msg_id)
+            mod = reaction.message.guild.get_member(user.id)
+            await execute_action(reaction.message.guild, action_data, reaction.message.channel, moderator=mod)
+        elif str(reaction.emoji) == "❌":
+            pending_actions.pop(msg_id)
+            await reaction.message.channel.send(
+                embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6)
+            )
+
+
+# ─────────────────────────────────────────────────────────────
+# FIX #7 : on_message — le nettoyage de member_message_days
+#           doit être protégé contre les mutations concurrentes
+#           (itération + clear). On utilise une copie des clés.
+# FIX #8 : cmd_daily redirige vers "daily" channel — on n'envoie
+#           plus d'erreur depuis n'importe quel salon (comportement
+#           voulu par design), c'est déjà géré dans cmd_daily.
+# ─────────────────────────────────────────────────────────────
+@client.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    # ── Shadow ban : suppression silencieuse ──
+    if message.author.id in shadow_banned:
+        shadow_banned[message.author.id]["blocked"] = \
+            shadow_banned[message.author.id].get("blocked", 0) + 1
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    await client.process_commands(message)
+
+    channel_name  = normalize_name(message.channel.name)
+    content       = message.content.strip()
+    content_lower = content.lower()
+
+    # ── Suivi activité (messages par jour) ──
+    mid   = str(message.author.id)
+    today = datetime.now(timezone.utc).date().isoformat()
+    if mid not in member_message_days:
+        member_message_days[mid] = {}
+    member_message_days[mid][today] = member_message_days[mid].get(today, 0) + 1
+
+    # FIX #7 : nettoyage sûr — on copie les clés avant de muter le dict
+    if len(member_message_days) > 5000:
+        keys_to_remove = list(member_message_days.keys())[:2500]
+        for k in keys_to_remove:
+            member_message_days.pop(k, None)
+
+    # ── XP + pièces par message ──
+    is_boosted = update_boost(message.author.id)
+    coin_gain  = COINS_BOOST if is_boosted else COINS_PER_MESSAGE
+    await add_xp_and_coins(message.author, message.guild, XP_PER_MESSAGE, coin_gain)
+
+    # ── Help ──
+    if content_lower in ["!help", "?help"]:
+        await send_help(message.channel)
+        return
+
+    # ── Commandes économie (salon jeux) ──
+    if "jeux" in channel_name:
+        if content_lower == "!profil":
+            await cmd_profil(message); return
+        if content_lower == "!inventaire":
+            await cmd_inventaire(message); return
+        if content_lower == "!classement":
+            await cmd_classement(message); return
+        if content_lower.startswith("!parrainer"):
+            await cmd_parrainer(message, content[10:].strip()); return
+        if content_lower in ["!boutique", "!spin"] or content_lower.startswith(("!acheter", "!équiper", "!cardspin")):
+            boutique_ch = get_channel_by_name(message.guild, "boutique")
+            if boutique_ch:
+                await message.channel.send(
+                    f"❌ Cette commande est réservée à {boutique_ch.mention} !"
+                )
+            return
+
+    # ── Commandes boutique ──
+    if "boutique" in channel_name:
+        if content_lower == "!boutique":
+            await cmd_boutique(message); return
+        if content_lower.startswith("!acheter "):
+            await cmd_acheter(message, content[9:].strip()); return
+        if content_lower.startswith("!équiper "):
+            await cmd_equiper(message, content[9:].strip()); return
+        if content_lower == "!spin":
+            await cmd_spin(message); return
+
+    # ── Daily (accessible depuis n'importe quel salon, cmd_daily gère la restriction) ──
+    if content_lower == "!daily":
+        await cmd_daily(message)
+        return
+
+    # ── Seulement le salon modération après ──
+    if "moderation" not in channel_name:
+        return
+
+    if not has_permission(message.author):
+        spammed = await check_spam(message)
+        if spammed:
+            return
+        await message.channel.send(
+            embed=discord.Embed(
+                title="❌ Permission refusée",
+                description="Tu n'as pas la permission d'utiliser le bot de modération.",
+                color=0xe74c3c
+            )
+        )
+        return
+
+    # ── !give ──
+    if content_lower.startswith("!give"):
+        await cmd_give(message, content[5:].strip())
+        return
+
+    # ── !shadowban / !shadowunban ──
+    if content_lower.startswith("!shadowban") and not content_lower.startswith("!shadowunban"):
+        if not any(r.name in ["Modérateur", "Fondateur"] for r in message.author.roles):
+            await message.channel.send("❌ Réservé aux modérateurs.")
+            return
+        if message.mentions:
+            target = message.mentions[0]
+            await shadow_ban_user(message.guild, message.author, target)
+            await message.channel.send(f"🕵️ **{target.display_name}** est maintenant shadow-banni.")
+        else:
+            await message.channel.send("❌ Usage : `!shadowban @membre`")
+        return
+
+    if content_lower.startswith("!shadowunban"):
+        if not any(r.name in ["Modérateur", "Fondateur"] for r in message.author.roles):
+            await message.channel.send("❌ Réservé aux modérateurs.")
+            return
+        if message.mentions:
+            target = message.mentions[0]
+            await shadow_unban_user(message.guild, target.id)
+            await message.channel.send(f"✅ **{target.display_name}** n'est plus shadow-banni.")
+        else:
+            await message.channel.send("❌ Usage : `!shadowunban @membre`")
+        return
+
+    # ── Commentaires en attente ──
+    if message.author.id in waiting_for_comment:
+        member_id, action, extra = waiting_for_comment[message.author.id]
+        if action == "add":
+            waiting_for_comment.pop(message.author.id)
+            db   = load_db()
+            data = get_member_data(db, member_id)
+            comment_text = (
+                f"[{datetime.now(timezone.utc).strftime('%d/%m/%Y')}] "
+                f"{message.author.display_name} : {message.content}"
+            )
+            data["comments"].append(comment_text)
+            save_db(db)
+            target = message.guild.get_member(member_id)
+            await message.channel.send(
+                embed=discord.Embed(title="✅ Commentaire ajouté", description=comment_text, color=0x2ecc71)
+            )
+            await log_action(
+                message.guild, "comment_add", message.author, target,
+                extra={"Commentaire": message.content}
+            )
+        return
+
+    # ── Raison en attente ──
+    if message.author.id in waiting_for_reason:
+        action_data = waiting_for_reason.pop(message.author.id)
+        async with message.channel.typing():
+            refined = await reformulate_reason(message.content)
+        action_data["reason"] = refined
+        await send_confirmation(message.channel, action_data, message.author.id)
+        return
+
+    # ── Vérification si c'est une commande de modération ──
+    if not await is_moderation_command(content):
+        return
+
+    # ── Parsing IA ──
+    try:
+        async with message.channel.typing():
+            r   = ai_client.chat.completions.create(
+                model=AI_MODEL,
+                messages=[{
+                    "role": "user",
+                    "content": f"{SYSTEM_PROMPT}\n\nMessage du modérateur: {message.content}"
+                }]
+            )
+            raw = r.choices[0].message.content.strip()
+            # Nettoyage du bloc ```json ... ```
+            if raw.startswith("```"):
+                parts = raw.split("```")
+                raw   = parts[1] if len(parts) > 1 else raw
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            raw         = raw.strip()
+            action_data = json.loads(raw)
+    except json.JSONDecodeError:
+        action_data = {"action": "none", "target": message.content.strip(), "needs_clarification": False}
+    except Exception as e:
+        await message.channel.send(
+            embed=discord.Embed(title="❌ Erreur IA", description=f"```{e}```", color=0xe74c3c)
+        )
+        return
+
+    # ── Action "none" → show_profile si une cible est identifiée ──
+    if action_data.get("action") == "none":
+        target = action_data.get("target", "").strip()
+        if target:
+            exact, similar, is_id, is_banned = await find_member(
+                message.guild, target, message.channel
+            )
+            all_candidates = exact + similar
+            if all_candidates:
+                action_data["action"]          = "show_profile"
+                action_data["resolved_member"] = all_candidates[0]
+                if len(all_candidates) == 1:
+                    await ask_action_choice(
+                        message.channel, all_candidates[0], action_data, message.author.id
+                    )
+                else:
+                    await handle_member_resolution(
+                        message.channel, action_data, message.author.id,
+                        exact, similar, is_id, is_banned
+                    )
+        return
+
+    if action_data.get("needs_clarification"):
+        await message.channel.send(f"❓ {action_data.get('clarification_question')}")
+        return
+
+    exact, similar, is_id, is_banned = await find_member(
+        message.guild, action_data.get("target", ""), message.channel
+    )
+    await handle_member_resolution(
+        message.channel, action_data, message.author.id,
+        exact, similar, is_id, is_banned
+    )
+
+
+client.run(DISCORD_TOKEN)

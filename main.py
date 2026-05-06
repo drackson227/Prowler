@@ -573,6 +573,8 @@ async def on_ready():
     client.loop.create_task(daily_report_loop())
     client.loop.create_task(update_active_roles_loop())
     client.loop.create_task(shop_rotate_loop())
+    await bot.tree.sync()
+print("✅ Slash commands synchronisées")
 
 @client.event
 async def on_member_join(member):

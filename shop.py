@@ -3,7 +3,7 @@ import json
 import random
 from datetime import datetime, timezone
 
-SHOP_FILE = "/data/shop.json"
+SHOP_FILE = "/tmp/shop.json"
 
 DEFAULT_SHOP = {
     "standard": [

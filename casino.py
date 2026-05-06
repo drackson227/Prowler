@@ -504,27 +504,18 @@ class Casino(commands.Cog):
 
         # Animation spin style "gem feel"
         EMOJIS_SPIN = ["⚫", "⚪", "🔵", "🟣", "🟢", "🟡", "🔴", "🌈"]
-        
+
         await msg.edit(content="🎴 **Les cartes sont tirées...**", embed=None, view=None)
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.8)
 
-        # Phase 1 : spin rapide
-        for _ in range(6):
+        for _ in range(4):
             e1 = random.choice(EMOJIS_SPIN)
             e2 = random.choice(EMOJIS_SPIN)
             await msg.edit(content=f"🎴 {e1} spinning... {e2}")
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.5)
 
-        # Phase 2 : ralentissement
-        for _ in range(3):
-            e1 = random.choice(EMOJIS_SPIN)
-            e2 = random.choice(EMOJIS_SPIN)
-            await msg.edit(content=f"🎴 {e1} spinning... {e2}")
-            await asyncio.sleep(0.55)
-
-        # Phase 3 : révélation dramatic
         await msg.edit(content="✨ **Révélation des cartes !** ✨")
-        await asyncio.sleep(0.7)
+        await asyncio.sleep(0.8)
 
         carte_c = random.choice(cartes_c)
         carte_a = random.choice(cartes_a)

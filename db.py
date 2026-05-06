@@ -4,25 +4,19 @@ from pymongo import MongoClient
 
 MONGO_URI = os.environ.get("MONGO_URI")
 client = MongoClient(MONGO_URI)
-db_mongo = client["prowler"]
-collection = db_mongo["members"]
+collection = client["prowler"]["members"]
 
 def load_db():
     docs = collection.find({})
     db = {}
     for doc in docs:
         mid = doc["_id"]
-        data = {k: v for k, v in doc.items() if k != "_id"}
-        db[mid] = data
+        db[mid] = {k: v for k, v in doc.items() if k != "_id"}
     return db
 
 def save_db(db):
     for mid, data in db.items():
-        collection.update_one(
-            {"_id": mid},
-            {"$set": data},
-            upsert=True
-        )
+        collection.update_one({"_id": mid}, {"$set": data}, upsert=True)
 
 def get_member_data(db, member_id):
     mid = str(member_id)

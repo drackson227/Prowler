@@ -482,6 +482,38 @@ class Casino(commands.Cog):
 
         await view.wait()
 
+        # Recharger la DB après l'attente pour éviter le timeout MongoDB
+        db = load_db()
+        data_c = get_member_data(db, interaction.user.id)
+        data_a = get_member_data(db, adversaire.id)
+            await interaction.followup.send(f"❌ Tu n'as que **{data_c['coins']} 🪙** !")
+            return
+        if data_a["coins"] < mise:
+            await interaction.followup.send(f"❌ {adversaire.display_name} n'a que **{data_a['coins']} 🪙** !")
+            return
+
+        cartes_c = data_c.get("cartes", [])
+        cartes_a = data_a.get("cartes", [])
+        if not cartes_c:
+            await interaction.followup.send("❌ Tu n'as aucune carte ! Fais `/cardspin` d'abord.")
+            return
+        if not cartes_a:
+            await interaction.followup.send(f"❌ {adversaire.display_name} n'a aucune carte !")
+            return
+
+        embed_challenge = discord.Embed(
+            title="⚔️ DUEL DE CARTES",
+            description=f"{interaction.user.mention} défie {adversaire.mention} !\n💰 **Pot : {mise * 2} 🪙**",
+            color=0xf1c40f
+        )
+        embed_challenge.add_field(name="Mise chacun", value=f"{mise} 🪙", inline=True)
+        embed_challenge.set_footer(text="30 secondes pour accepter ou refuser !")
+
+        view = DuelView(interaction.user, adversaire, mise)
+        msg = await interaction.followup.send(embed=embed_challenge, view=view)
+
+        await view.wait()
+
         if view.accepte is None or not view.accepte:
             embed_refuse = discord.Embed(
                 title="⚔️ Duel refusé",

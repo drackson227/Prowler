@@ -15,7 +15,6 @@ from economy import analyze_member_messages, get_level_from_xp
 ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 
 async def is_moderation_command(content: str) -> bool:
-    """Détecte si un message ressemble à une commande de modération."""
     content_lower = content.lower()
     keywords = [
         "ban", "kick", "mute", "warn", "unmute", "unban",
@@ -23,7 +22,7 @@ async def is_moderation_command(content: str) -> bool:
         "sanction", "silence", "expulse", "expulser"
     ]
     return any(kw in content_lower for kw in keywords)
-    
+
 pending_actions = {}
 waiting_for_reason = {}
 waiting_for_member_choice = {}
@@ -155,28 +154,28 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
     data = get_member_data(db, member.id)
     try:
         if action == "ban":
-    try:
-        await member.ban(reason=reason)
-        data["bans"] += 1
-    except discord.Forbidden:
-        await mod_channel.send(embed=discord.Embed(
-            title="❌ BAN IMPOSSIBLE",
-            description=f"Permissions insuffisantes pour bannir **{member.display_name}**.",
-            color=0xE74C3C
-        ))
-        report_ch = get_channel_by_name(guild, "rapport-prowler")
-        if report_ch:
-            embed_report = discord.Embed(
-                title="🚨 TENTATIVE BAN RATÉE",
-                description=f"**{moderator.mention}** a tenté de bannir **{member.mention}**\n**Raison :** Hiérarchie supérieure",
-                color=0xE74C3C,
-                timestamp=datetime.now(timezone.utc)
-            )
-            embed_report.add_field(name="👮 Auteur", value=f"{moderator} (ID: `{moderator.id}`)", inline=True)
-            embed_report.add_field(name="🎯 Cible", value=f"{member} (ID: `{member.id}`)", inline=True)
-            embed_report.set_thumbnail(url=moderator.display_avatar.url)
-            await report_ch.send(embed=embed_report)
-        return
+            try:
+                await member.ban(reason=reason)
+                data["bans"] += 1
+            except discord.Forbidden:
+                await mod_channel.send(embed=discord.Embed(
+                    title="❌ BAN IMPOSSIBLE",
+                    description=f"Permissions insuffisantes pour bannir **{member.display_name}**.",
+                    color=0xe74c3c
+                ))
+                report_ch = get_channel_by_name(guild, "rapport-prowler")
+                if report_ch and moderator:
+                    embed_report = discord.Embed(
+                        title="🚨 TENTATIVE BAN RATÉE",
+                        description=f"**{moderator.mention}** a tenté de bannir **{member.mention}**\n**Raison :** Permissions insuffisantes",
+                        color=0xe74c3c,
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                    embed_report.add_field(name="👮 Auteur", value=f"{moderator} (ID: `{moderator.id}`)", inline=True)
+                    embed_report.add_field(name="🎯 Cible", value=f"{member} (ID: `{member.id}`)", inline=True)
+                    embed_report.set_thumbnail(url=moderator.display_avatar.url)
+                    await report_ch.send(embed=embed_report)
+                return
         elif action == "kick":
             await member.kick(reason=reason)
             data["kicks"] += 1
@@ -219,6 +218,7 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
                     pass
             action_data["deleted_count"] = deleted
             action_data["deleted_by_channel"] = deleted_by_channel
+
         if action not in ["unmute", "unban", "delete_messages", "show_profile"]:
             data["sanctions"].append({
                 "type": action, "reason": reason,
@@ -226,9 +226,11 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
                 "duration": action_data.get("duration_minutes")
             })
         save_db(db)
+
         if moderator and action != "show_profile":
             tgt_name = member.display_name if hasattr(member, "display_name") else str(member)
             mod_commands_log.append((datetime.now(timezone.utc).timestamp(), moderator.display_name, action, tgt_name))
+
         color = ACTION_COLORS.get(action, 0x2ecc71)
         label = ACTION_LABELS.get(action, action)
         duration = action_data.get("duration_minutes")
@@ -249,12 +251,14 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
             embed.add_field(name="📍 Salons", value=ch_detail, inline=True)
         embed.set_footer(text=f"ID : {member.id}")
         await mod_channel.send(embed=embed)
+
         if action != "show_profile":
             extra = {"Durée": f"{duration} min" if duration else None}
             if action == "delete_messages":
                 extra["Messages supprimés"] = str(action_data.get("deleted_count", 0))
                 extra["Salons"] = ", ".join([f"#{ch} ({n})" for ch, n in action_data.get("deleted_by_channel", {}).items()]) or "—"
             await log_action(guild, action, moderator, member, reason=reason, extra=extra)
+
     except discord.Forbidden:
         await mod_channel.send(embed=discord.Embed(
             title="❌ Permission refusée",
@@ -464,7 +468,6 @@ async def cmd_give(message, args):
         )
         embed.set_thumbnail(url=target.display_avatar.url)
         await message.channel.send(embed=embed)
-        from utils import log_action
         await log_action(message.guild, "give_coins", message.author, target, extra={"Pièces": f"+{amount}", "Solde": data["coins"]})
         return
 
@@ -526,7 +529,6 @@ async def cmd_give(message, args):
                 return
             found_role = top[emojis.index(emoji)][1]
 
-        # Confirmation
         confirm_embed = discord.Embed(
             title="⚠️ Confirmer l'attribution",
             description=f"Donner le rôle **{found_role.name}** à {target.mention} ?",
@@ -560,7 +562,6 @@ async def cmd_give(message, args):
                 description=f"Le rôle **{found_role.name}** a été attribué à {target.mention}",
                 color=found_role.color if found_role.color.value else discord.Color(0x2ecc71)
             ))
-            from utils import log_action
             await log_action(message.guild, "give_role", message.author, target, extra={"Rôle": found_role.name})
         except discord.Forbidden:
             await confirm_msg.edit(embed=discord.Embed(
@@ -577,7 +578,6 @@ async def cmd_give(message, args):
             await message.channel.send("❌ Précise le nom de la carte. Ex: `!give @membre carte Kebab Froid`")
             return
 
-        # Import du catalogue de cartes
         try:
             from cards import CARTES, RARETES
         except ImportError:
@@ -624,7 +624,6 @@ async def cmd_give(message, args):
                 return
             found_carte = top[emojis.index(emoji)][1]
 
-        # Confirmation
         rarete_info = RARETES.get(found_carte["rarete"], {})
         rarete_color = rarete_info.get("couleur", 0x3498db)
         rarete_emoji = rarete_info.get("emoji", "❓")
@@ -650,7 +649,6 @@ async def cmd_give(message, args):
             await confirm_msg.edit(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))
             return
 
-        # Ajout de la carte à l'inventaire
         db = load_db()
         data = get_member_data(db, target.id)
         data.setdefault("cartes", []).append({
@@ -668,7 +666,6 @@ async def cmd_give(message, args):
             ),
             color=rarete_color
         ))
-        from utils import log_action
         await log_action(message.guild, "give_carte", message.author, target,
                          extra={"Carte": found_carte["nom"], "Rareté": rarete_label})
         return
@@ -684,6 +681,3 @@ async def cmd_give(message, args):
         ),
         color=0x3498db
     ))
-    embed.set_thumbnail(url=target.display_avatar.url)
-    await message.channel.send(embed=embed)
-    await log_action(message.guild, "give_coins", message.author, target, extra={"Pièces": f"+{amount}", "Solde": data["coins"]})

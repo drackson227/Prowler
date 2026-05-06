@@ -5,6 +5,7 @@ import random
 import asyncio
 from datetime import datetime, timezone, timedelta
 from db import load_db, save_db, get_member_data
+from cards import RARETES
 
 # ============================================================
 # CONSTANTES

@@ -155,8 +155,28 @@ async def execute_action(guild, action_data, mod_channel, moderator=None):
     data = get_member_data(db, member.id)
     try:
         if action == "ban":
-            await member.ban(reason=reason)
-            data["bans"] += 1
+    try:
+        await member.ban(reason=reason)
+        data["bans"] += 1
+    except discord.Forbidden:
+        await mod_channel.send(embed=discord.Embed(
+            title="❌ BAN IMPOSSIBLE",
+            description=f"Permissions insuffisantes pour bannir **{member.display_name}**.",
+            color=0xE74C3C
+        ))
+        report_ch = get_channel_by_name(guild, "rapport-prowler")
+        if report_ch:
+            embed_report = discord.Embed(
+                title="🚨 TENTATIVE BAN RATÉE",
+                description=f"**{moderator.mention}** a tenté de bannir **{member.mention}**\n**Raison :** Hiérarchie supérieure",
+                color=0xE74C3C,
+                timestamp=datetime.now(timezone.utc)
+            )
+            embed_report.add_field(name="👮 Auteur", value=f"{moderator} (ID: `{moderator.id}`)", inline=True)
+            embed_report.add_field(name="🎯 Cible", value=f"{member} (ID: `{member.id}`)", inline=True)
+            embed_report.set_thumbnail(url=moderator.display_avatar.url)
+            await report_ch.send(embed=embed_report)
+        return
         elif action == "kick":
             await member.kick(reason=reason)
             data["kicks"] += 1

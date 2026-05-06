@@ -609,7 +609,7 @@ class Casino(commands.Cog):
                 ))
                 break
 
-@app_commands.command(name="casino-help", description="📖 Guide complet des jeux du casino")
+    @app_commands.command(name="casino-help", description="📖 Guide complet des jeux du casino")
     async def casino_help(self, interaction: discord.Interaction):
         embed = discord.Embed(
             title="🎰 Guide du Casino — Gare du Nord",

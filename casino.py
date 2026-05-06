@@ -111,7 +111,6 @@ class Casino(commands.Cog):
 
     @app_commands.command(name="regles-blackjack", description="📖 Règles et guide du Blackjack")
     async def regles_blackjack(self, interaction: discord.Interaction):
-        await interaction.response.send_message("📖 Chargement des règles...", ephemeral=True)
         embed = discord.Embed(title="🃏 Règles du Blackjack", color=0xF1C40F)
         embed.add_field(name="🎯 Objectif",
             value="Avoir une main dont la valeur est **plus proche de 21** que celle du croupier, **sans dépasser 21**.",
@@ -136,11 +135,10 @@ class Casino(commands.Cog):
             value="• 🃏 **Card Shark** — 60%+ winrate sur 10+ parties\n• 🎰 **Pro Gambler** — 100 parties jouées\n• 💎 **High Roller** — +5 000 🪙 de profit net",
             inline=False)
         embed.set_footer(text="Prowler Bot • ?help dans #casino pour toutes les commandes")
-        await interaction.edit_original_response(content=None, embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="regles-dice", description="📖 Règles du jeu de dés")
     async def regles_dice(self, interaction: discord.Interaction):
-        await interaction.response.send_message("📖 Chargement des règles...", ephemeral=True)
         embed = discord.Embed(title="🎲 Règles du Dice — Double ou Rien", color=0x3498DB)
         embed.add_field(name="🎯 Objectif",
             value="Lancer un dé et obtenir une valeur **plus haute** que celle du bot pour doubler ta mise.",
@@ -153,11 +151,10 @@ class Casino(commands.Cog):
             inline=False)
         embed.add_field(name="⏱️ Cooldown", value="10 secondes entre chaque partie.", inline=False)
         embed.set_footer(text="Prowler Bot • Simple, rapide, 50/50 !")
-        await interaction.edit_original_response(content=None, embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="regles-duel", description="📖 Règles du Gacha Duel")
     async def regles_duel(self, interaction: discord.Interaction):
-        await interaction.response.send_message("📖 Chargement des règles...", ephemeral=True)
         embed = discord.Embed(title="⚔️ Règles du Gacha Duel", color=0x9B59B6)
         embed.add_field(name="🎯 Objectif",
             value="Défier un autre joueur — chacun tire une **rareté de carte** aléatoire. La meilleure rareté remporte le pot !",
@@ -174,7 +171,7 @@ class Casino(commands.Cog):
         embed.add_field(name="⚖️ Égalité",
             value="En cas d'égalité de rareté, un **dé** départage les deux joueurs.", inline=False)
         embed.set_footer(text="Prowler Bot • Que le meilleur gagne !")
-        await interaction.edit_original_response(content=None, embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ══════════════════════════════════════════════════════════════════════════
     # BLACKJACK — logique principale
@@ -372,39 +369,54 @@ class Casino(commands.Cog):
     @app_commands.command(name="blackjack-low", description="🟢 Blackjack Table Low (10–100 🪙) — Accessible à tous")
     @app_commands.describe(mise="Ta mise (10 à 100 pièces)")
     async def bj_low(self, interaction: discord.Interaction, mise: int):
-        await interaction.response.send_message("🎰 Lancement de la partie...", ephemeral=True)
+        # FIX: defer() puis followup pour éviter "L'application ne répond plus"
+        await interaction.response.defer(ephemeral=True)
+        ok, mention = check_casino(interaction.channel, interaction.guild)
+        if not ok:
+            await interaction.followup.send(f"❌ Blackjack **uniquement** dans {mention} !", ephemeral=True)
+            return
+        await interaction.followup.send("🎰 Lancement de la partie...", ephemeral=True)
         await self._blackjack(interaction.channel, interaction.user, mise, "🟢 Low", 10, 100)
 
     @app_commands.command(name="blackjack-high", description="🟡 Blackjack Table High (500–5000 🪙)")
     @app_commands.describe(mise="Ta mise (500 à 5000 pièces)")
     async def bj_high(self, interaction: discord.Interaction, mise: int):
-        await interaction.response.send_message("🎰 Vérification de ton accès...", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        ok, mention = check_casino(interaction.channel, interaction.guild)
+        if not ok:
+            await interaction.followup.send(f"❌ Blackjack **uniquement** dans {mention} !", ephemeral=True)
+            return
         db = load_db()
         data = get_member_data(db, interaction.user.id)
         bj = data.get("blackjack", {})
         total_parties = bj.get("total_parties", 0)
         winrate = bj.get("winrate", 0)
         if total_parties >= 10 and winrate < 50:
-            await interaction.edit_original_response(
-                content=(
-                    f"❌ Table High réservée aux joueurs avec **50%+ winrate**.\n"
-                    f"Ton winrate : **{winrate}%** sur **{total_parties}** parties.\n"
-                    f"Continue sur la Table Low !"
-                )
+            await interaction.followup.send(
+                f"❌ Table High réservée aux joueurs avec **50%+ winrate**.\n"
+                f"Ton winrate : **{winrate}%** sur **{total_parties}** parties.\n"
+                f"Continue sur la Table Low !",
+                ephemeral=True
             )
             return
+        await interaction.followup.send("🎰 Vérification OK, lancement...", ephemeral=True)
         await self._blackjack(interaction.channel, interaction.user, mise, "🟡 High", 500, 5000)
 
     @app_commands.command(name="blackjack-vip", description="🔴 Blackjack Table VIP (10 000+ 🪙) — Modos seulement")
     @app_commands.describe(mise="Ta mise (10 000+ pièces)")
     @app_commands.default_permissions(manage_roles=True)
     async def bj_vip(self, interaction: discord.Interaction, mise: int):
-        await interaction.response.send_message("🎰 Lancement de la partie VIP...", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        ok, mention = check_casino(interaction.channel, interaction.guild)
+        if not ok:
+            await interaction.followup.send(f"❌ Blackjack **uniquement** dans {mention} !", ephemeral=True)
+            return
+        await interaction.followup.send("🎰 Lancement de la partie VIP...", ephemeral=True)
         await self._blackjack(interaction.channel, interaction.user, mise, "🔴 VIP", 10000, 999999)
 
     @app_commands.command(name="blackjack-stats", description="📊 Tes statistiques Blackjack")
     async def bj_stats(self, interaction: discord.Interaction):
-        await interaction.response.send_message("📊 Chargement de tes stats...", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
         db = load_db()
         data = get_member_data(db, interaction.user.id)
         bj = get_or_init_bj(data)
@@ -429,7 +441,7 @@ class Casino(commands.Cog):
             embed.add_field(name="🟡 Table High", value="✅ Accès débloqué !", inline=False)
         else:
             embed.add_field(name="🟡 Table High", value=f"❌ Bloqué — winrate trop bas ({winrate}% < 50%)", inline=False)
-        await interaction.edit_original_response(content=None, embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ══════════════════════════════════════════════════════════════════════════
     # DICE
@@ -490,7 +502,13 @@ class Casino(commands.Cog):
     @app_commands.command(name="dice", description="🎲 Double ou rien ! Dé vs Bot (10–1000 🪙)")
     @app_commands.describe(mise="Ta mise (10 à 1000 pièces)")
     async def slash_dice(self, interaction: discord.Interaction, mise: int):
-        await interaction.response.send_message("🎲 Lancement des dés...", ephemeral=True)
+        # FIX: defer() + check casino avant followup
+        await interaction.response.defer(ephemeral=True)
+        ok, mention = check_casino(interaction.channel, interaction.guild)
+        if not ok:
+            await interaction.followup.send(f"❌ Dice **uniquement** dans {mention} !", ephemeral=True)
+            return
+        await interaction.followup.send("🎲 Lancement des dés...", ephemeral=True)
         await self._dice(interaction.channel, interaction.user, mise)
 
     @commands.command(name="dice")
@@ -499,7 +517,7 @@ class Casino(commands.Cog):
 
     @app_commands.command(name="mystats", description="📊 Tes stats Dice")
     async def slash_mystats(self, interaction: discord.Interaction):
-        await interaction.response.send_message("📊 Chargement...", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
         db = load_db()
         data = get_member_data(db, interaction.user.id)
         d = get_or_init_dice(data)
@@ -510,42 +528,48 @@ class Casino(commands.Cog):
         embed.add_field(name="✅ Victoires", value=str(d["wins"]), inline=True)
         embed.add_field(name="❌ Défaites", value=str(d["losses"]), inline=True)
         embed.add_field(name="📊 Winrate", value=f"{wr}%", inline=True)
-        await interaction.edit_original_response(content=None, embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # GACHA DUEL
+    # GACHA DUEL — FIX PRINCIPAL
     # ══════════════════════════════════════════════════════════════════════════
     @app_commands.command(name="gacha-duel", description="⚔️ Duel Gacha — Meilleure rareté gagne le pot !")
     @app_commands.describe(adversaire="Ton adversaire", mise="Mise (25–500 🪙)")
     async def slash_gacha_duel(self, interaction: discord.Interaction, adversaire: discord.Member, mise: int):
-        await interaction.response.send_message("⚔️ Lancement du duel...", ephemeral=True)
+        # FIX: defer() immédiatement pour éviter le timeout de 3s de Discord
+        await interaction.response.defer(ephemeral=True)
+
         channel = interaction.channel
         joueur = interaction.user
 
         ok, mention = check_casino(channel, joueur.guild)
         if not ok:
-            await interaction.edit_original_response(content=f"❌ Gacha Duel **uniquement** dans {mention} !")
+            await interaction.followup.send(f"❌ Gacha Duel **uniquement** dans {mention} !", ephemeral=True)
             return
         if adversaire.bot or adversaire == joueur:
-            await interaction.edit_original_response(content="❌ Adversaire invalide.")
+            await interaction.followup.send("❌ Adversaire invalide.", ephemeral=True)
             return
         if not (25 <= mise <= 500):
-            await interaction.edit_original_response(content="❌ Mise entre 25 et 500 🪙.")
+            await interaction.followup.send("❌ Mise entre 25 et 500 🪙.", ephemeral=True)
             return
         if joueur.id in self.en_duel or adversaire.id in self.en_duel:
-            await interaction.edit_original_response(content="❌ L'un de vous est déjà en duel.")
+            await interaction.followup.send("❌ L'un de vous est déjà en duel.", ephemeral=True)
             return
 
         db = load_db()
         dj = get_member_data(db, joueur.id)
         da = get_member_data(db, adversaire.id)
         if dj["coins"] < mise:
-            await interaction.edit_original_response(content=f"❌ Solde insuffisant ({dj['coins']} 🪙).")
+            await interaction.followup.send(f"❌ Solde insuffisant ({dj['coins']} 🪙).", ephemeral=True)
             return
         if da["coins"] < mise:
-            await interaction.edit_original_response(content=f"❌ {adversaire.display_name} n'a que {da['coins']} 🪙.")
+            await interaction.followup.send(f"❌ {adversaire.display_name} n'a que {da['coins']} 🪙.", ephemeral=True)
             return
 
+        # Confirmer à l'utilisateur que le duel est lancé (ephemeral)
+        await interaction.followup.send(f"⚔️ Duel lancé contre {adversaire.mention} !", ephemeral=True)
+
+        # Le duel se déroule dans le channel public
         embed_ch = discord.Embed(
             title="🎰 CASINO DUEL",
             description=f"⚔️ {joueur.mention} défie {adversaire.mention} !\n💰 Mise : **{mise} 🪙** chacun\n🏆 **POT : {mise*2} 🪙**",
@@ -667,7 +691,7 @@ class Casino(commands.Cog):
 
     @app_commands.command(name="top-duel", description="🏆 Leaderboard des duels Gacha")
     async def slash_top_duel(self, interaction: discord.Interaction):
-        await interaction.response.send_message("🏆 Chargement du leaderboard...", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
         db = load_db()
         data_list = []
         for mid, data in db.items():
@@ -687,7 +711,7 @@ class Casino(commands.Cog):
             description="\n".join(lines) if lines else "Aucun duel (5 minimum requis).",
             color=0x9B59B6
         )
-        await interaction.edit_original_response(content=None, embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot):

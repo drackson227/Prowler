@@ -23,7 +23,7 @@ from utils import (
 from economy import (
     add_xp_and_coins, cmd_profil, cmd_inventaire, cmd_boutique,
     cmd_acheter, cmd_equiper, cmd_spin, cmd_classement, cmd_daily,
-    cmd_parrainer, get_level_from_xp, equip_role_discord
+    cmd_parrainer, get_level_from_xp
 )
 from shop import rotate_shop, load_shop
 from moderation import (
@@ -39,29 +39,28 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.reactions = True
-intents.voice_states = True  # ← AJOUT pour voice coins
+intents.voice_states = True
 
 client = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 member_message_days = {}
 
 # ── VOICE COINS ──────────────────────────────────────────────────────────────
-voice_timers = {}       # user_id: asyncio.Task
-voice_start_time = {}   # user_id: datetime
+voice_timers = {}
+voice_start_time = {}
 VOICE_COINS_PER_MINUTE = 2
-VOICE_XP_PER_MINUTE = 0  # Optionnel, 0 = désactivé
+VOICE_XP_PER_MINUTE = 0
 
 # ── SHADOW BAN ────────────────────────────────────────────────────────────────
-shadow_banned = {}  # user_id: {"since": datetime, "blocked": int, "spam_score": int}
+shadow_banned = {}
 
 def normalize_name(s):
     s = s.lower().replace("・", "")
     return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("ascii")
 
 # ============================================================
-# VOICE COINS — 1 min vocal = 2 🪙
+# VOICE COINS
 # ============================================================
 async def voice_coins_loop(member):
-    """Distribue des pièces toutes les minutes passées en vocal."""
     while True:
         await asyncio.sleep(60)
         if member.voice and not member.voice.self_mute and not member.voice.self_deaf:
@@ -74,15 +73,11 @@ async def on_voice_state_update(member, before, after):
     if member.bot:
         return
     uid = member.id
-
-    # Rejoint un salon vocal
     if after.channel and (not before.channel or before.channel != after.channel):
         voice_start_time[uid] = datetime.now(timezone.utc)
         if uid in voice_timers:
             voice_timers[uid].cancel()
         voice_timers[uid] = asyncio.create_task(voice_coins_loop(member))
-
-    # Quitte un salon vocal
     elif before.channel and (not after.channel or after.channel != before.channel):
         if uid in voice_timers:
             voice_timers[uid].cancel()
@@ -102,7 +97,6 @@ async def on_voice_state_update(member, before, after):
 # SHADOW BAN
 # ============================================================
 async def shadow_ban_user(guild, moderator, target):
-    """Shadow-banne un membre — lui seul croit que ses messages passent."""
     db = load_db()
     data = get_member_data(db, target.id)
     data["shadow_banned"] = True
@@ -110,15 +104,12 @@ async def shadow_ban_user(guild, moderator, target):
     data["shadow_ban_count"] = data.get("shadow_ban_count", 0) + 1
     save_db(db)
     shadow_banned[target.id] = {"since": datetime.now(timezone.utc), "blocked": 0, "spam_score": 0}
-
     report_ch = get_channel_by_name(guild, "rapport-prowler")
     if report_ch:
-        embed = discord.Embed(title="🕵️ SHADOW MODE ACTIF", color=0x2C2C2C,
-                               timestamp=datetime.now(timezone.utc))
+        embed = discord.Embed(title="🕵️ SHADOW MODE ACTIF", color=0x2C2C2C, timestamp=datetime.now(timezone.utc))
         embed.add_field(name="👤 Cible", value=f"{target.mention} [SHADOW #{data['shadow_ban_count']}]", inline=True)
-        embed.add_field(name="👮 Moderateur", value=moderator.mention, inline=True)
+        embed.add_field(name="👮 Modérateur", value=moderator.mention, inline=True)
         embed.add_field(name="📊 Statut", value="0 msg bloqués | Score spam 0%", inline=False)
-        embed.add_field(name="Actions", value="👁️ Reveal (shadow-unban) • ❌ Permaban", inline=False)
         msg = await report_ch.send(embed=embed)
         await msg.add_reaction("👁️")
         await msg.add_reaction("❌")
@@ -134,15 +125,11 @@ async def shadow_unban_user(guild, target_id):
 # AUTO-APPEAL IA
 # ============================================================
 async def auto_appeal_check(guild, banned_user):
-    """Analyse automatique IA pour les bans et envoie un embed aux modos."""
     db = load_db()
     data = db.get(str(banned_user.id), {})
     sanctions = data.get("sanctions", [])
     total_warns = data.get("total_warns", 0)
-    total_messages = data.get("total_messages", 0)
     bans_count = data.get("bans", 0)
-
-    # Score IA simplifié (logique locale, pas d'appel API)
     score_injuste = 100
     if total_warns > 3: score_injuste -= 20
     if total_warns > 6: score_injuste -= 20
@@ -150,11 +137,8 @@ async def auto_appeal_check(guild, banned_user):
     recent_sanctions = [s for s in sanctions if s.get("type") in ["spam_mute", "mute"]]
     if len(recent_sanctions) > 2: score_injuste -= 15
     score_injuste = max(10, min(95, score_injuste))
-
     recommandation = "Unban + surveillance" if score_injuste >= 60 else "Maintenir le ban"
     couleur = 0x2ECC71 if score_injuste >= 60 else 0xE74C3C
-
-    # DM à l'utilisateur banni
     try:
         await banned_user.send(
             f"🤖 **Auto-Appeal Prowler Bot**\n\n"
@@ -165,19 +149,14 @@ async def auto_appeal_check(guild, banned_user):
         )
     except Exception:
         pass
-
     report_ch = get_channel_by_name(guild, "rapport-prowler")
     if not report_ch:
         return
-
-    embed = discord.Embed(title="🤖 AUTO-APPEAL", color=couleur,
-                           timestamp=datetime.now(timezone.utc))
+    embed = discord.Embed(title="🤖 AUTO-APPEAL", color=couleur, timestamp=datetime.now(timezone.utc))
     embed.set_thumbnail(url=banned_user.display_avatar.url)
     embed.add_field(name="👤 Utilisateur", value=f"{banned_user} (ID: {banned_user.id})", inline=True)
     embed.add_field(name="📊 Score IA", value=f"**{score_injuste}% injuste**", inline=True)
-    embed.add_field(name="📝 Historique",
-                    value=f"⚠️ Warns : {total_warns} | 🔇 Mutes : {len(recent_sanctions)} | 🔨 Bans : {bans_count}",
-                    inline=False)
+    embed.add_field(name="📝 Historique", value=f"⚠️ Warns : {total_warns} | 🔇 Mutes : {len(recent_sanctions)} | 🔨 Bans : {bans_count}", inline=False)
     embed.add_field(name="✅ Recommandation", value=recommandation, inline=False)
     embed.set_footer(text="✅ Unban • ❌ Refuser • ℹ️ Profil")
     msg = await report_ch.send(embed=embed)
@@ -191,59 +170,99 @@ async def auto_appeal_check(guild, banned_user):
 async def send_help(channel):
     channel_name = normalize_name(channel.name)
     embed = discord.Embed(color=0x3498db, timestamp=datetime.now(timezone.utc))
-    if "jeux" in channel_name:
+
+    VOC_SECTION = (
+        "\n\n**🎙️ Salons vocaux (depuis n'importe quel salon)**\n"
+        "`!createvoc NomDuSalon` — créer un salon vocal temporaire\n"
+        "`!vockick @m` • `!vocmute @m` • `!vocunmute @m`\n"
+        "`!voclock` • `!vocunlock` • `!vocrename Nom` • `!vocsuppr`"
+    )
+
+    if "cmds-" in channel_name:
+        embed.title = "📖 Ton salon vocal privé 🎙️"
+        embed.description = (
+            "Ces commandes sont utilisables **depuis n'importe quel salon** :\n\n"
+            "`!vockick @membre` — expulser un membre\n"
+            "`!vocmute @membre` — muter un membre\n"
+            "`!vocunmute @membre` — démuter un membre\n"
+            "`!voclock` — fermer le salon aux nouveaux\n"
+            "`!vocunlock` — rouvrir le salon\n"
+            "`!vocrename NouveauNom` — renommer le salon\n"
+            "`!vocsuppr` — supprimer le salon"
+        )
+    elif "jeux" in channel_name:
         embed.title = "📖 Commandes — 🎮・jeux"
         embed.description = (
-            "🎮・jeux — `/profil`, `/classement`, `/inventaire`\n"
-            "🛍️・boutique — `/boutique`, `/rolespin`, `/cardspin`\n"
-            "🎁・daily — `/daily`\n"
-            "🔄・trades — `/trade`, `/donner`\n"
-            "🎰・casino — `/blackjack-low`, `/dice`, `/gacha-duel`\n\n"
-            "🎮 **Imposteur** (salon privé requis) :\n"
-            "1️⃣ Crée d'abord un salon privé : `/createvoc NomDuSalon`\n"
-            "2️⃣ Lance ensuite le jeu : `/imposteur`\n\n"
-            "🎙️ **Salon vocal** — `/createvoc NomDuSalon`\n"
-            "➕ Un salon texte privé est créé automatiquement pour gérer ton vocal.\n\n"
-            "Tape `?help` dans chaque salon pour les commandes détaillées.\n"
+            "**Profil & Stats**\n"
+            "`!profil` / `/profil [@membre]` — niveau, XP, pièces\n"
+            "`!inventaire` / `/inventaire` — rôles achetés\n"
+            "`!classement` / `/classement` — top 10 membres\n"
+            "`/solde` — vérifier ton solde (discret)\n\n"
+            "**Cartes**\n"
+            "`!collection [@pseudo]` — ta collection\n"
+            "`!cartesinfo` — probabilités des raretés\n\n"
+            "**Social**\n"
+            "`!parrainer @pseudo` — parrainer un ami (+100 🪙 chacun)\n\n"
             "🎤 **+2 🪙/min** en vocal automatiquement !"
+            + VOC_SECTION
         )
     elif "boutique" in channel_name:
         embed.title = "📖 Commandes — 🛍️・boutique"
         embed.description = (
+            "**Boutique Rôles**\n"
             "`!boutique` / `/boutique` — voir la boutique\n"
             "`!acheter [nom]` / `/acheter` — acheter un article\n"
             "`!équiper [nom]` / `/equiper` — équiper un rôle\n"
-            "`!spin` / `/rolespin` — gacha rôles (50 🪙)\n"
+            "`!spin` / `/rolespin` — gacha rôles (50 🪙)\n\n"
+            "**Cartes**\n"
             "`!cardspin` / `/cardspin` — gacha cartes (100 🪙)\n"
-            "`!cartesinfo` / `/cartesinfo` — probabilités des raretés\n\n"
+            "`!cartesinfo` — probabilités des raretés\n\n"
             "💡 Boutique rotative renouvellement toutes les **3h**"
+            + VOC_SECTION
         )
     elif "daily" in channel_name:
         embed.title = "📖 Commandes — 🎁・daily"
         embed.description = (
             "`!daily` / `/daily` — récompense quotidienne\n\n"
             "🔥 **Streak :** x1.5 (3j) → x2 (7j) → x2.5 (14j) → x3 (30j)\n"
-            "💰 Base : 50 🪙 + 20 XP"
+            "💰 Base : 50 🪙 + 20 XP\n"
+            "⚠️ Un jour manqué → streak repart à **0** !"
+            + VOC_SECTION
         )
-    elif "trades" in channel_name:
+    elif "trade" in channel_name:
         embed.title = "📖 Commandes — 🔄・trades"
         embed.description = (
-            "`!trade @membre` / `/trade` — trade interactif (salon privé)\n"
+            "`!trade @membre` / `/trade` — trade interactif\n"
             "`!trade @membre give X contre Y` — trade rapide\n"
-            "`!donner @membre 500` / `/donner` — donner des pièces\n"
-            "`!collection` / `/collection` — ta collection de cartes"
+            "`!donner @membre [montant]` — donner des pièces\n"
+            "`!collection [@pseudo]` — voir une collection\n\n"
+            "**Modérateurs uniquement**\n"
+            "`!tradecancel @membre` — débloquer un trade figé"
+            + VOC_SECTION
         )
     elif "casino" in channel_name:
         embed.title = "📖 Commandes — 🎰・casino"
         embed.description = (
+            "**🃏 Blackjack**\n"
             "`/blackjack-low [mise]` — Table Low (10–100 🪙)\n"
             "`/blackjack-high [mise]` — Table High (500–5k 🪙)\n"
             "`/blackjack-vip [mise]` — VIP Modos (10k+ 🪙)\n"
-            "`/blackjack-stats` — Tes stats Blackjack\n\n"
-            "`/dice [mise]` — 🎲 Double ou rien (10–1000 🪙)\n"
-            "`/mystats` — Tes stats Dice\n\n"
-            "`/gacha-duel @adversaire [mise]` — ⚔️ Duel Gacha (25–500 🪙)\n"
-            "`/top-duel` — 🏆 Leaderboard duels"
+            "`/blackjack-stats` — tes stats\n\n"
+            "**🎲 Dice**\n"
+            "`/dice [mise]` — double ou rien (10–1000 🪙)\n\n"
+            "**⚔️ Gacha Duel**\n"
+            "`/gacha-duel @adversaire [mise]` — duel (25–500 🪙)\n"
+            "`/top-duel` — leaderboard duels"
+        )
+    elif "ticket" in channel_name:
+        embed.title = "📖 Commandes — 🎟️・tickets"
+        embed.description = (
+            "Réagis avec **🎫** pour ouvrir un ticket.\n\n"
+            "• Contester une sanction\n"
+            "• Signaler un problème\n"
+            "• Demander de l'aide\n\n"
+            "⚠️ Les membres **mutés** peuvent toujours ouvrir un ticket.\n"
+            "🔒 Les modérateurs ferment le ticket avec **🔒**."
         )
     elif "moderation" in channel_name:
         embed.title = "📖 Commandes — Modération"
@@ -251,35 +270,46 @@ async def send_help(channel):
             "Écris en **langage naturel** :\n"
             "`mute @pseudo 30 minutes` • `ban @pseudo`\n"
             "`kick @pseudo` • `warn @pseudo`\n"
+            "`unmute @pseudo` • `unban @pseudo`\n"
             "`supprime les 10 derniers messages de @pseudo`\n"
             "`profil de @pseudo`\n\n"
-            "**Commandes spéciales :**\n"
-            "`!give @membre 500` — donner pièces (Fondateur)\n"
-            "`!give @membre role NomDuRole` — donner rôle (Fondateur)\n"
+            "**Fondateur uniquement :**\n"
+            "`!give @membre 500` — donner pièces\n"
+            "`!give @membre role NomDuRole` — donner rôle\n\n"
+            "**Shadow Ban :**\n"
             "`!shadowban @membre` — shadow-ban silencieux\n"
             "`!shadowunban @membre` — lever le shadow-ban\n\n"
-            "🎮 **Imposteur** (salon privé requis) :\n"
-            "`/imposteur` — uniquement dans un **salon textuel privé**\n"
-            "→ Crée d'abord ton salon avec `/createvoc NomDuSalon`"
+            "**Trades :**\n"
+            "`!tradecancel @membre` — débloquer un trade figé"
+        )
+    elif "log" in channel_name:
+        embed.title = "📖 Lecture des logs"
+        embed.description = (
+            "🔨 Bans • 👢 Kicks • 🔇 Mutes • ⚠️ Warns\n"
+            "🔊 Demutes • ✅ Débans • 📥 Arrivées • 📤 Départs\n"
+            "💬 Commentaires modos • 🤖 Anti-spam\n"
+            "🛍️ Achats • 🎰 Gacha • 🎁 Daily • 👗 Équipements\n"
+            "🎟️ Tickets • 🔄 Trades • 🕵️ Shadow bans"
         )
     else:
         embed.title = "📖 Aide — Prowler Bot"
         embed.description = (
-            "🎮・jeux — `/profil`, `/classement`, `/inventaire`\n"
-            "🛍️・boutique — `/boutique`, `/rolespin`, `/cardspin`\n"
-            "🎁・daily — `/daily`\n"
-            "🔄・trades — `/trade`, `/donner`\n"
-            "🎰・casino — `/blackjack-low`, `/dice`, `/gacha-duel`\n"
-            "🎮 Imposteur — `/imposteur`\n"
-            "🎙️ Vocal — `/createvoc NomDuSalon`\n\n"
-            "Tape `?help` dans chaque salon pour les commandes détaillées.\n"
-            "🎤 **+2 🪙/min** en vocal automatiquement !"
+            "🎮・jeux — profil, classement, inventaire, cartes\n"
+            "🛍️・boutique — boutique, gacha rôles & cartes\n"
+            "🎁・daily — récompense quotidienne\n"
+            "🔄・trades — échanges de cartes et dons\n"
+            "🎰・casino — blackjack, dice, gacha duel\n"
+            "🎟️・tickets — contester une sanction\n\n"
+            "🎙️ `!createvoc NomDuSalon` — créer un salon vocal\n"
+            "🎤 **+2 🪙/min** en vocal automatiquement !\n\n"
+            "Tape `?help` dans chaque salon pour les commandes détaillées."
         )
+
     embed.set_footer(text="Prowler Bot • ! et / sont tous les deux acceptés")
     await channel.send(embed=embed)
 
 # ============================================================
-# SLASH COMMANDS — Économie
+# SLASH COMMANDS
 # ============================================================
 @client.tree.command(name="profil", description="Affiche ton profil : niveau, XP, pièces, rôle équipé")
 @app_commands.describe(membre="Le membre dont tu veux voir le profil (optionnel)")
@@ -326,17 +356,27 @@ async def slash_classement(interaction: discord.Interaction):
     embed = discord.Embed(title="🏆 Classement — Top 10", description="\n".join(lines) if lines else "Aucun membre.", color=0xf1c40f)
     await interaction.followup.send(embed=embed)
 
-@client.tree.command(name="inventaire", description="Affiche ton inventaire de rôles")
-async def slash_inventaire(interaction: discord.Interaction):
+@client.tree.command(name="daily", description="Récupère ta récompense quotidienne")
+async def slash_daily(interaction: discord.Interaction):
     await interaction.response.defer()
     class FakeMsg:
         author = interaction.user
         guild = interaction.guild
         channel = interaction.channel
         mentions = []
-    await cmd_inventaire(FakeMsg())
+    await cmd_daily(FakeMsg())
 
-@client.tree.command(name="boutique", description="Affiche la boutique standard, rotative et le gacha")
+@client.tree.command(name="rolespin", description="Lance le gacha de rôles (50 🪙)")
+async def slash_rolespin(interaction: discord.Interaction):
+    await interaction.response.defer()
+    class FakeMsg:
+        author = interaction.user
+        guild = interaction.guild
+        channel = interaction.channel
+        mentions = []
+    await cmd_spin(FakeMsg())
+
+@client.tree.command(name="boutique", description="Affiche la boutique")
 async def slash_boutique(interaction: discord.Interaction):
     await interaction.response.defer()
     class FakeMsg:
@@ -367,37 +407,6 @@ async def slash_equiper(interaction: discord.Interaction, role: str):
         channel = interaction.channel
         mentions = []
     await cmd_equiper(FakeMsg(), role)
-
-@client.tree.command(name="rolespin", description="Lance le gacha de rôles (50 🪙)")
-async def slash_rolespin(interaction: discord.Interaction):
-    await interaction.response.defer()
-    class FakeMsg:
-        author = interaction.user
-        guild = interaction.guild
-        channel = interaction.channel
-        mentions = []
-    await cmd_spin(FakeMsg())
-
-@client.tree.command(name="daily", description="Récupère ta récompense quotidienne")
-async def slash_daily(interaction: discord.Interaction):
-    await interaction.response.defer()
-    class FakeMsg:
-        author = interaction.user
-        guild = interaction.guild
-        channel = interaction.channel
-        mentions = []
-    await cmd_daily(FakeMsg())
-
-@client.tree.command(name="parrainer", description="Parraine un ami et recevez chacun 100 🪙")
-@app_commands.describe(membre="Le membre que tu veux parrainer")
-async def slash_parrainer(interaction: discord.Interaction, membre: discord.Member):
-    await interaction.response.defer()
-    class FakeMsg:
-        author = interaction.user
-        guild = interaction.guild
-        channel = interaction.channel
-        mentions = [membre]
-    await cmd_parrainer(FakeMsg(), "")
 
 @client.tree.command(name="notif", description="Active ou désactive les notifications de level up en MP")
 @app_commands.describe(etat="on pour activer, off pour désactiver")
@@ -440,10 +449,7 @@ async def send_daily_report(guild):
                 elif t == "kick": kicks.append((name, reason))
                 elif t in ["mute", "spam_mute"]: mutes.append((name, reason))
                 elif t == "warn": warns.append((name, reason))
-    embed = discord.Embed(
-        title=f"📝 Rapport de modération — {today}",
-        color=0x3498db, timestamp=datetime.now(timezone.utc)
-    )
+    embed = discord.Embed(title=f"📝 Rapport de modération — {today}", color=0x3498db, timestamp=datetime.now(timezone.utc))
     def fmt_list(lst):
         if not lst: return "Aucun"
         return "\n".join([f"• **{n}** — {r}" for n, r in lst[:10]])
@@ -457,12 +463,9 @@ async def send_daily_report(guild):
         cmd_counts = Counter(f"{mod} → {act}" for _, mod, act, _ in today_cmds)
         cmd_txt = "\n".join([f"• **{k}** × {v}" for k, v in cmd_counts.most_common(10)])
         embed.add_field(name=f"🖱️ Actions modos ({len(today_cmds)})", value=cmd_txt, inline=False)
-
-    # Shadow bans actifs
     if shadow_banned:
         sb_txt = "\n".join([f"• ID:{uid} — {v['blocked']} msgs bloqués" for uid, v in list(shadow_banned.items())[:5]])
         embed.add_field(name=f"🕵️ Shadow bans actifs ({len(shadow_banned)})", value=sb_txt, inline=False)
-
     embed.set_footer(text="Rapport automatique quotidien")
     await report_ch.send(embed=embed)
 
@@ -495,6 +498,8 @@ async def shop_rotate_loop():
             wait = (next_rotate - datetime.now(timezone.utc)).total_seconds()
             if wait > 0:
                 await asyncio.sleep(wait)
+            else:
+                await asyncio.sleep(10800)
         else:
             await asyncio.sleep(SHOP_ROTATE_INTERVAL)
         new_items = rotate_shop()
@@ -551,21 +556,17 @@ async def update_active_roles_loop():
 @client.event
 async def on_ready():
     print(f"✅ {client.user} connecté !")
-
-    extensions = ["cards", "trades", "voc", "tickets", "casino", "imposteur"]
-    for ext in extensions:
+    for ext in ["cards", "trades", "voc", "tickets", "casino", "imposteur"]:
         try:
             await client.load_extension(ext)
             print(f"✅ Extension {ext} chargée")
         except Exception as e:
             print(f"❌ Erreur chargement {ext} : {e}")
-
     try:
         synced = await client.tree.sync()
         print(f"✅ {len(synced)} slash commands synchronisées")
     except Exception as e:
         print(f"❌ Erreur sync slash commands : {e}")
-
     client.loop.create_task(daily_report_loop())
     client.loop.create_task(update_active_roles_loop())
     client.loop.create_task(shop_rotate_loop())
@@ -588,8 +589,7 @@ async def on_member_remove(member):
 
 @client.event
 async def on_member_ban(guild, user):
-    """Déclenche l'auto-appeal IA lors d'un ban."""
-    await asyncio.sleep(2)  # Laisse le temps à Discord de processer
+    await asyncio.sleep(2)
     await auto_appeal_check(guild, user)
 
 @client.event
@@ -598,12 +598,10 @@ async def on_reaction_add(reaction, user):
         return
     msg_id = reaction.message.id
 
-    # ── Réactions Auto-Appeal ────────────────────────────────────────────────
     embed = reaction.message.embeds[0] if reaction.message.embeds else None
     if embed and "AUTO-APPEAL" in (embed.title or ""):
         if not has_permission(reaction.message.guild.get_member(user.id)):
             return
-        # Extrait l'ID depuis le footer ou le champ
         for field in embed.fields:
             if "ID:" in field.value:
                 try:
@@ -620,20 +618,6 @@ async def on_reaction_add(reaction, user):
                     pass
                 break
 
-    # ── Réactions Shadow Ban ─────────────────────────────────────────────────
-    if embed and "SHADOW MODE" in (embed.title or ""):
-        if not has_permission(reaction.message.guild.get_member(user.id)):
-            return
-        if str(reaction.emoji) == "👁️":
-            # Lever le shadow ban
-            for field in embed.fields:
-                if "[SHADOW" in field.value:
-                    try:
-                        mention = field.value.split(" ")[0]
-                        # On ne peut pas facilement extraire l'ID depuis la mention ici
-                        await reaction.message.channel.send("✅ Shadow-unban : utilise `!shadowunban @membre`.")
-                    except: pass
-
     if msg_id in waiting_for_action_choice:
         choice_type, member, action_data, requester_id = waiting_for_action_choice[msg_id]
 
@@ -646,13 +630,13 @@ async def on_reaction_add(reaction, user):
             elif str(reaction.emoji) == "🔍":
                 db = load_db()
                 data = get_member_data(db, member.id)
-                embed = discord.Embed(title=f"👤 Profil (banni) — {member.display_name}", color=0xe74c3c)
-                embed.set_thumbnail(url=member.display_avatar.url)
-                embed.add_field(name="🏷️ Pseudo", value=member.name, inline=True)
-                embed.add_field(name="🆔 ID", value=f"`{member.id}`", inline=True)
-                embed.add_field(name="⚡ Statut", value="🔨 **Banni du serveur**", inline=False)
-                embed.add_field(name="🛡️ Historique", value=f"⚠️ Warns total : {data['total_warns']}\n🔇 Mutes : {data['mutes']} | 👢 Kicks : {data['kicks']} | 🔨 Bans : {data['bans']}", inline=False)
-                await reaction.message.channel.send(embed=embed)
+                embed2 = discord.Embed(title=f"👤 Profil (banni) — {member.display_name}", color=0xe74c3c)
+                embed2.set_thumbnail(url=member.display_avatar.url)
+                embed2.add_field(name="🏷️ Pseudo", value=member.name, inline=True)
+                embed2.add_field(name="🆔 ID", value=f"`{member.id}`", inline=True)
+                embed2.add_field(name="⚡ Statut", value="🔨 **Banni du serveur**", inline=False)
+                embed2.add_field(name="🛡️ Historique", value=f"⚠️ Warns total : {data['total_warns']}\n🔇 Mutes : {data['mutes']} | 👢 Kicks : {data['kicks']} | 🔨 Bans : {data['bans']}", inline=False)
+                await reaction.message.channel.send(embed=embed2)
             elif str(reaction.emoji) == "❌":
                 await reaction.message.channel.send(embed=discord.Embed(title="❌ Action annulée", color=0x95a5a6))
             return
@@ -686,10 +670,10 @@ async def on_reaction_add(reaction, user):
                     await reaction.message.channel.send("Aucun commentaire à supprimer.")
                     return
                 emojis_c = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
-                embed = discord.Embed(title="🗑️ Supprimer un commentaire", color=0xe74c3c)
+                embed2 = discord.Embed(title="🗑️ Supprimer un commentaire", color=0xe74c3c)
                 for i, c in enumerate(comments[:5]):
-                    embed.add_field(name=f"{emojis_c[i]}", value=c, inline=False)
-                cmsg = await reaction.message.channel.send(embed=embed)
+                    embed2.add_field(name=f"{emojis_c[i]}", value=c, inline=False)
+                cmsg = await reaction.message.channel.send(embed=embed2)
                 for i in range(len(comments[:5])):
                     await cmsg.add_reaction(emojis_c[i])
                 waiting_for_comment[user.id] = (member.id, "remove_pick", cmsg.id)
@@ -754,18 +738,14 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    # ── Shadow Ban : supprime les messages silencieusement ───────────────────
     if message.author.id in shadow_banned:
         sb = shadow_banned[message.author.id]
         sb["blocked"] = sb.get("blocked", 0) + 1
-        # Calcul score spam
-        sb["spam_score"] = min(99, int(sb["blocked"] / max(1, (datetime.now(timezone.utc) - sb["since"]).total_seconds() / 3600) * 10))
         try:
             await message.delete()
         except Exception:
             pass
-        # Mise à jour embed dans rapport-prowler
-        return  # Ne process PAS les commandes pour les shadow-bannés
+        return
 
     await client.process_commands(message)
 
@@ -773,18 +753,15 @@ async def on_message(message):
     content = message.content.strip()
     content_lower = content.lower()
 
-    # Suivi activité
     mid = str(message.author.id)
     today = datetime.now(timezone.utc).date().isoformat()
     if mid not in member_message_days:
         member_message_days[mid] = {}
     member_message_days[mid][today] = member_message_days[mid].get(today, 0) + 1
 
-    # Anti RAM-leak : nettoie si trop gros
     if len(member_message_days) > 5000:
         member_message_days.clear()
 
-    # XP & pièces
     is_boosted = update_boost(message.author.id)
     coin_gain = COINS_BOOST if is_boosted else COINS_PER_MESSAGE
     await add_xp_and_coins(message.author, message.guild, XP_PER_MESSAGE, coin_gain)
@@ -828,7 +805,6 @@ async def on_message(message):
         await cmd_give(message, content[5:].strip())
         return
 
-    # ── Shadow ban commands ───────────────────────────────────────────────────
     if content_lower.startswith("!shadowban"):
         if not any(r.name in ["Modérateur", "Fondateur"] for r in message.author.roles):
             await message.channel.send("❌ Réservé aux modérateurs.")
@@ -836,7 +812,7 @@ async def on_message(message):
         if message.mentions:
             target = message.mentions[0]
             await shadow_ban_user(message.guild, message.author, target)
-            await message.channel.send(f"🕵️ **{target.display_name}** est maintenant shadow-banni. Rapport dans #rapport-prowler.")
+            await message.channel.send(f"🕵️ **{target.display_name}** est maintenant shadow-banni.")
         return
 
     if content_lower.startswith("!shadowunban"):
@@ -871,10 +847,8 @@ async def on_message(message):
         await send_confirmation(message.channel, action_data, message.author.id)
         return
 
-    already_waiting = (message.author.id in waiting_for_reason or message.author.id in waiting_for_comment)
-    if not already_waiting:
-        if not await is_moderation_command(content):
-            return
+    if not await is_moderation_command(content):
+        return
 
     try:
         async with message.channel.typing():

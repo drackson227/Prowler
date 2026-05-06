@@ -609,9 +609,70 @@ class Casino(commands.Cog):
                 ))
                 break
 
-
+@app_commands.command(name="casino-help", description="📖 Guide complet des jeux du casino")
+    async def casino_help(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="🎰 Guide du Casino — Gare du Nord",
+            description="Tous les jeux disponibles dans le salon 🎰・casino",
+            color=0xFFD700
+        )
+        embed.add_field(
+            name="🃏 Blackjack — 3 Tables",
+            value=(
+                "`/blackjack-low [mise]` — Table Low (**10–100** 🪙)\n"
+                "`/blackjack-high [mise]` — Table High (**500–5 000** 🪙)\n"
+                "`/blackjack-vip [mise]` — Table VIP (**10 000+** 🪙)\n\n"
+                "**But :** Atteindre 21 sans dépasser, battre le croupier.\n"
+                "✅ **Hit** → Tirer une carte\n"
+                "❌ **Stand** → Rester sur sa main\n"
+                "⚡ **Double** → Doubler la mise + 1 carte\n"
+                "🌟 **Blackjack naturel** (As + 10) = gain x1.5"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="🎲 Dice — Double ou Rien",
+            value=(
+                "`/dice [mise]` — Mise : **10–1 000** 🪙\n\n"
+                "**But :** Obtenir un dé plus élevé que le croupier.\n"
+                "🏆 Ton dé > croupier → **+mise** 🪙\n"
+                "💀 Ton dé < croupier → **-mise** 🪙"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="⚔️ Gacha Duel — PVP",
+            value=(
+                "`/gacha-duel [@membre] [mise]` — Mise : **25–500** 🪙\n\n"
+                "**But :** Défier un autre membre. Chacun obtient un score aléatoire.\n"
+                "Le score le plus élevé remporte le pot entier (**mise x2**).\n"
+                "Le défié a **30 secondes** pour accepter ou refuser."
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="📊 Stats & Classements",
+            value=(
+                "`/blackjack-stats` — Tes stats de blackjack (privé)\n"
+                "`/top-duel` — Classement des duels du serveur"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="🎖️ Rôles Débloquables",
+            value=(
+                "**🃏 Card Shark** — 60%+ winrate blackjack (10 parties min)\n"
+                "**🎰 Pro Gambler** — 100 parties de blackjack\n"
+                "**💎 High Roller** — 5 000+ 🪙 de gains"
+            ),
+            inline=False
+        )
+        embed.set_footer(text="🍀 Bonne chance ! Joue dans #・casino uniquement.")
+        await interaction.response.send_message(embed=embed)
+    
 # ============================================================
 # SETUP
 # ============================================================
+    
 async def setup(bot):
     await bot.add_cog(Casino(bot))

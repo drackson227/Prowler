@@ -111,7 +111,7 @@ class Casino(commands.Cog):
 
     @app_commands.command(name="regles-blackjack", description="📖 Règles et guide du Blackjack")
     async def regles_blackjack(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.send_message("📖 Chargement des règles...", ephemeral=True)
         embed = discord.Embed(title="🃏 Règles du Blackjack", color=0xF1C40F)
         embed.add_field(name="🎯 Objectif",
             value="Avoir une main dont la valeur est **plus proche de 21** que celle du croupier, **sans dépasser 21**.",
@@ -128,36 +128,36 @@ class Casino(commands.Cog):
         embed.add_field(name="🤖 Règle du croupier",
             value="Le croupier tire des cartes jusqu'à atteindre **17 ou plus**.", inline=False)
         embed.add_field(name="🎰 Tables disponibles",
-            value=("`/blackjack-low [mise]` — 10 à 100 🪙 🟢 *(accessible à tous)*\n"
-                   "`/blackjack-high [mise]` — 500 à 5 000 🪙 🟡 *(50%+ winrate après 10 parties)*\n"
-                   "`/blackjack-vip [mise]` — 10 000+ 🪙 🔴 *(Modos seulement)*"),
+            value=("`/blackjack-low [mise]` — 10 à 100 🪙 🟢\n"
+                   "`/blackjack-high [mise]` — 500 à 5 000 🪙 🟡\n"
+                   "`/blackjack-vip [mise]` — 10 000+ 🪙 🔴 *(Modos)*"),
             inline=False)
         embed.add_field(name="🏅 Rôles déblocables",
             value="• 🃏 **Card Shark** — 60%+ winrate sur 10+ parties\n• 🎰 **Pro Gambler** — 100 parties jouées\n• 💎 **High Roller** — +5 000 🪙 de profit net",
             inline=False)
         embed.set_footer(text="Prowler Bot • ?help dans #casino pour toutes les commandes")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.edit_original_response(content=None, embed=embed)
 
     @app_commands.command(name="regles-dice", description="📖 Règles du jeu de dés")
     async def regles_dice(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.send_message("📖 Chargement des règles...", ephemeral=True)
         embed = discord.Embed(title="🎲 Règles du Dice — Double ou Rien", color=0x3498DB)
         embed.add_field(name="🎯 Objectif",
             value="Lancer un dé et obtenir une valeur **plus haute** que celle du bot pour doubler ta mise.",
             inline=False)
         embed.add_field(name="⚙️ Comment jouer",
-            value="1. Tape `/dice [mise]` avec une mise entre **10 et 1 000 🪙**\n2. Toi et le bot lancez chacun un dé (1 à 6)\n3. Le plus haut score gagne !",
+            value="1. `/dice [mise]` avec une mise entre **10 et 1 000 🪙**\n2. Toi et le bot lancez chacun un dé (1 à 6)\n3. Le plus haut score gagne !",
             inline=False)
         embed.add_field(name="🏆 Résultats",
             value="• **Ton dé > dé bot** → **+mise** 🪙 ✅\n• **Égalité** → mise conservée 🤝\n• **Ton dé < dé bot** → **-mise** 🪙 ❌",
             inline=False)
         embed.add_field(name="⏱️ Cooldown", value="10 secondes entre chaque partie.", inline=False)
         embed.set_footer(text="Prowler Bot • Simple, rapide, 50/50 !")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.edit_original_response(content=None, embed=embed)
 
     @app_commands.command(name="regles-duel", description="📖 Règles du Gacha Duel")
     async def regles_duel(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.send_message("📖 Chargement des règles...", ephemeral=True)
         embed = discord.Embed(title="⚔️ Règles du Gacha Duel", color=0x9B59B6)
         embed.add_field(name="🎯 Objectif",
             value="Défier un autre joueur — chacun tire une **rareté de carte** aléatoire. La meilleure rareté remporte le pot !",
@@ -174,7 +174,7 @@ class Casino(commands.Cog):
         embed.add_field(name="⚖️ Égalité",
             value="En cas d'égalité de rareté, un **dé** départage les deux joueurs.", inline=False)
         embed.set_footer(text="Prowler Bot • Que le meilleur gagne !")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.edit_original_response(content=None, embed=embed)
 
     # ══════════════════════════════════════════════════════════════════════════
     # BLACKJACK — logique principale
@@ -216,7 +216,6 @@ class Casino(commands.Cog):
             embed.add_field(name="🃏 Tes cartes", value=f"{format_hand(main_joueur)} **[{score_j}]**", inline=False)
             embed.add_field(name="🤖 Croupier", value=f"{format_hand(main_croupier, hide_second=True)} **[??]**", inline=False)
 
-            # Blackjack immédiat
             if score_j == 21:
                 gain = int(mise * 2.5)
                 db = load_db()
@@ -242,7 +241,6 @@ class Casino(commands.Cog):
             await msg.edit(content=f"{player.mention}", embed=embed)
             await msg.add_reaction("✅")
             await msg.add_reaction("❌")
-            # Reload coins pour vérifier si le double est possible
             db_check = load_db()
             data_check = get_member_data(db_check, player.id)
             if data_check["coins"] >= mise:
@@ -374,44 +372,39 @@ class Casino(commands.Cog):
     @app_commands.command(name="blackjack-low", description="🟢 Blackjack Table Low (10–100 🪙) — Accessible à tous")
     @app_commands.describe(mise="Ta mise (10 à 100 pièces)")
     async def bj_low(self, interaction: discord.Interaction, mise: int):
-        await interaction.response.defer()
+        await interaction.response.send_message("🎰 Lancement de la partie...", ephemeral=True)
         await self._blackjack(interaction.channel, interaction.user, mise, "🟢 Low", 10, 100)
 
-    @app_commands.command(name="blackjack-high", description="🟡 Blackjack Table High (500–5000 🪙) — Accessible à tous")
+    @app_commands.command(name="blackjack-high", description="🟡 Blackjack Table High (500–5000 🪙)")
     @app_commands.describe(mise="Ta mise (500 à 5000 pièces)")
     async def bj_high(self, interaction: discord.Interaction, mise: int):
-        await interaction.response.defer()
-
-        # ── FIX : restriction winrate uniquement après 10 parties ─────────────
+        await interaction.response.send_message("🎰 Vérification de ton accès...", ephemeral=True)
         db = load_db()
         data = get_member_data(db, interaction.user.id)
         bj = data.get("blackjack", {})
         total_parties = bj.get("total_parties", 0)
         winrate = bj.get("winrate", 0)
-
-        # Bloque seulement si le joueur a 10+ parties ET winrate < 50%
         if total_parties >= 10 and winrate < 50:
-            await interaction.followup.send(
-                f"{interaction.user.mention} ❌ Table High réservée aux joueurs avec **50%+ winrate**.\n"
-                f"Ton winrate actuel : **{winrate}%** sur **{total_parties}** parties.\n"
-                f"Continue sur la Table Low pour améliorer ton winrate !",
-                ephemeral=True
+            await interaction.edit_original_response(
+                content=(
+                    f"❌ Table High réservée aux joueurs avec **50%+ winrate**.\n"
+                    f"Ton winrate : **{winrate}%** sur **{total_parties}** parties.\n"
+                    f"Continue sur la Table Low !"
+                )
             )
             return
-
-        # Nouveaux joueurs (< 10 parties) → accès libre
         await self._blackjack(interaction.channel, interaction.user, mise, "🟡 High", 500, 5000)
 
     @app_commands.command(name="blackjack-vip", description="🔴 Blackjack Table VIP (10 000+ 🪙) — Modos seulement")
     @app_commands.describe(mise="Ta mise (10 000+ pièces)")
     @app_commands.default_permissions(manage_roles=True)
     async def bj_vip(self, interaction: discord.Interaction, mise: int):
-        await interaction.response.defer()
+        await interaction.response.send_message("🎰 Lancement de la partie VIP...", ephemeral=True)
         await self._blackjack(interaction.channel, interaction.user, mise, "🔴 VIP", 10000, 999999)
 
     @app_commands.command(name="blackjack-stats", description="📊 Tes statistiques Blackjack")
     async def bj_stats(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.send_message("📊 Chargement de tes stats...", ephemeral=True)
         db = load_db()
         data = get_member_data(db, interaction.user.id)
         bj = get_or_init_bj(data)
@@ -423,26 +416,20 @@ class Casino(commands.Cog):
         embed.add_field(name="💰 Net", value=f"{bj['pot_net']:+} 🪙", inline=True)
         embed.add_field(name="🔥 Hot streak max", value=str(bj["hot_streak"]), inline=True)
         embed.add_field(name="🃏 Meilleure main", value=str(bj["best_hand"]), inline=True)
-
-        # Infos table High
         total_parties = bj["total_parties"]
         winrate = bj["winrate"]
         if total_parties < 10:
             remaining = 10 - total_parties
             embed.add_field(
                 name="🟡 Table High",
-                value=f"Accessible — joue encore **{remaining}** partie(s) pour activer la restriction winrate.",
+                value=f"Accessible — encore **{remaining}** partie(s) avant activation de la restriction.",
                 inline=False
             )
         elif winrate >= 50:
             embed.add_field(name="🟡 Table High", value="✅ Accès débloqué !", inline=False)
         else:
-            embed.add_field(
-                name="🟡 Table High",
-                value=f"❌ Bloqué — winrate trop bas ({winrate}% < 50%)",
-                inline=False
-            )
-        await interaction.followup.send(embed=embed, ephemeral=True)
+            embed.add_field(name="🟡 Table High", value=f"❌ Bloqué — winrate trop bas ({winrate}% < 50%)", inline=False)
+        await interaction.edit_original_response(content=None, embed=embed)
 
     # ══════════════════════════════════════════════════════════════════════════
     # DICE
@@ -457,24 +444,20 @@ class Casino(commands.Cog):
         if not (10 <= mise <= 1000):
             await channel.send(f"{player.mention} ❌ Mise entre 10 et 1000 🪙.")
             return
-
         now = asyncio.get_event_loop().time()
         last = self.dice_cooldowns.get(player.id, 0)
         if now - last < 10:
             await channel.send(f"{player.mention} ⏳ Cooldown ! Attends {10 - int(now - last)}s.")
             return
-
         db = load_db()
         data = get_member_data(db, player.id)
         if data["coins"] < mise:
             await channel.send(f"{player.mention} ❌ Solde insuffisant ({data['coins']} 🪙).")
             return
-
         self.dice_cooldowns[player.id] = now
         de_joueur = random.randint(1, 6)
         de_bot = random.randint(1, 6)
         win = de_joueur > de_bot
-
         db = load_db()
         data = get_member_data(db, player.id)
         dice_s = get_or_init_dice(data)
@@ -486,7 +469,6 @@ class Casino(commands.Cog):
             data["coins"] -= mise
             dice_s["losses"] += 1
         save_db(db)
-
         faces = ["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"]
         embed = discord.Embed(
             title="🎲 DOUBLE OU RIEN",
@@ -501,7 +483,6 @@ class Casino(commands.Cog):
             embed.set_footer(text=f"🤝 Égalité — Mise conservée → Total : {data['coins']} 🪙")
         else:
             embed.set_footer(text=f"❌ Perdu {mise} 🪙 → Total : {data['coins']} 🪙")
-
         await channel.send(f"{player.mention}", embed=embed)
         await log_casino(player.guild, "Dice", player,
                          f"{de_joueur} vs {de_bot}", mise if win else (-mise if de_joueur < de_bot else 0))
@@ -509,7 +490,7 @@ class Casino(commands.Cog):
     @app_commands.command(name="dice", description="🎲 Double ou rien ! Dé vs Bot (10–1000 🪙)")
     @app_commands.describe(mise="Ta mise (10 à 1000 pièces)")
     async def slash_dice(self, interaction: discord.Interaction, mise: int):
-        await interaction.response.defer()
+        await interaction.response.send_message("🎲 Lancement des dés...", ephemeral=True)
         await self._dice(interaction.channel, interaction.user, mise)
 
     @commands.command(name="dice")
@@ -518,7 +499,7 @@ class Casino(commands.Cog):
 
     @app_commands.command(name="mystats", description="📊 Tes stats Dice")
     async def slash_mystats(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.send_message("📊 Chargement...", ephemeral=True)
         db = load_db()
         data = get_member_data(db, interaction.user.id)
         d = get_or_init_dice(data)
@@ -529,7 +510,7 @@ class Casino(commands.Cog):
         embed.add_field(name="✅ Victoires", value=str(d["wins"]), inline=True)
         embed.add_field(name="❌ Défaites", value=str(d["losses"]), inline=True)
         embed.add_field(name="📊 Winrate", value=f"{wr}%", inline=True)
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.edit_original_response(content=None, embed=embed)
 
     # ══════════════════════════════════════════════════════════════════════════
     # GACHA DUEL
@@ -537,32 +518,32 @@ class Casino(commands.Cog):
     @app_commands.command(name="gacha-duel", description="⚔️ Duel Gacha — Meilleure rareté gagne le pot !")
     @app_commands.describe(adversaire="Ton adversaire", mise="Mise (25–500 🪙)")
     async def slash_gacha_duel(self, interaction: discord.Interaction, adversaire: discord.Member, mise: int):
-        await interaction.response.defer()
+        await interaction.response.send_message("⚔️ Lancement du duel...", ephemeral=True)
         channel = interaction.channel
         joueur = interaction.user
 
         ok, mention = check_casino(channel, joueur.guild)
         if not ok:
-            await channel.send(f"{joueur.mention} ❌ Gacha Duel **uniquement** dans {mention} !")
+            await interaction.edit_original_response(content=f"❌ Gacha Duel **uniquement** dans {mention} !")
             return
         if adversaire.bot or adversaire == joueur:
-            await channel.send(f"{joueur.mention} ❌ Adversaire invalide.")
+            await interaction.edit_original_response(content="❌ Adversaire invalide.")
             return
         if not (25 <= mise <= 500):
-            await channel.send(f"{joueur.mention} ❌ Mise entre 25 et 500 🪙.")
+            await interaction.edit_original_response(content="❌ Mise entre 25 et 500 🪙.")
             return
         if joueur.id in self.en_duel or adversaire.id in self.en_duel:
-            await channel.send(f"{joueur.mention} ❌ L'un de vous est déjà en duel.")
+            await interaction.edit_original_response(content="❌ L'un de vous est déjà en duel.")
             return
 
         db = load_db()
         dj = get_member_data(db, joueur.id)
         da = get_member_data(db, adversaire.id)
         if dj["coins"] < mise:
-            await channel.send(f"{joueur.mention} ❌ Solde insuffisant ({dj['coins']} 🪙).")
+            await interaction.edit_original_response(content=f"❌ Solde insuffisant ({dj['coins']} 🪙).")
             return
         if da["coins"] < mise:
-            await channel.send(f"{joueur.mention} ❌ {adversaire.display_name} n'a que {da['coins']} 🪙.")
+            await interaction.edit_original_response(content=f"❌ {adversaire.display_name} n'a que {da['coins']} 🪙.")
             return
 
         embed_ch = discord.Embed(
@@ -686,7 +667,7 @@ class Casino(commands.Cog):
 
     @app_commands.command(name="top-duel", description="🏆 Leaderboard des duels Gacha")
     async def slash_top_duel(self, interaction: discord.Interaction):
-        await interaction.response.defer()
+        await interaction.response.send_message("🏆 Chargement du leaderboard...", ephemeral=True)
         db = load_db()
         data_list = []
         for mid, data in db.items():
@@ -706,10 +687,8 @@ class Casino(commands.Cog):
             description="\n".join(lines) if lines else "Aucun duel (5 minimum requis).",
             color=0x9B59B6
         )
-        await interaction.followup.send(embed=embed)
+        await interaction.edit_original_response(content=None, embed=embed)
 
 
 async def setup(bot):
     await bot.add_cog(Casino(bot))
-ENDOFFILE
-echo "Done"

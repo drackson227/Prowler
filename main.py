@@ -300,7 +300,10 @@ async def send_help(channel):
             "🔄・trades — échanges de cartes et dons\n"
             "🎰・casino — blackjack, dice, gacha duel\n"
             "🎟️・tickets — contester une sanction\n\n"
-            "🎙️ `!createvoc NomDuSalon` — créer un salon vocal\n"
+            "🎙️ **Salon vocal privé**\n"
+            "`!createvoc NomDuSalon` — crée un salon vocal **+ un salon textuel privé** automatiquement\n"
+            "→ Le salon texte privé sert à gérer ton vocal (`!voclock`, `!vockick`, etc.)\n"
+            "→ Seuls toi et les membres que tu invites peuvent le voir\n\n"
             "🎤 **+2 🪙/min** en vocal automatiquement !\n\n"
             "Tape `?help` dans chaque salon pour les commandes détaillées."
         )

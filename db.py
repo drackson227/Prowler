@@ -1,18 +1,28 @@
 import os
 import json
+from pymongo import MongoClient
 
-DB_FILE = "/data/db.json"
+MONGO_URI = os.environ.get("MONGO_URI")
+client = MongoClient(MONGO_URI)
+db_mongo = client["prowler"]
+collection = db_mongo["members"]
 
 def load_db():
-    if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+    docs = collection.find({})
+    db = {}
+    for doc in docs:
+        mid = doc["_id"]
+        data = {k: v for k, v in doc.items() if k != "_id"}
+        db[mid] = data
+    return db
 
 def save_db(db):
-    os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(db, f, ensure_ascii=False, indent=2)
+    for mid, data in db.items():
+        collection.update_one(
+            {"_id": mid},
+            {"$set": data},
+            upsert=True
+        )
 
 def get_member_data(db, member_id):
     mid = str(member_id)
@@ -28,4 +38,4 @@ def get_member_data(db, member_id):
     for key, default in defaults.items():
         if key not in db[mid]:
             db[mid][key] = default
-    return db[mid]  # ✅ FIX CRITIQUE : plus de [phases.setup]
+    return db[mid]

@@ -132,7 +132,6 @@ class BlackjackView(discord.ui.View):
         for child in self.children:
             child.disabled = True
 
-        # Croupier tire jusqu'à 17
         while valeur_main(self.main_croupier) < 17:
             self.main_croupier.append(nouvelle_carte())
 
@@ -287,7 +286,6 @@ class Casino(commands.Cog):
             await interaction.followup.send(f"❌ Tu n'as que **{data['coins']} 🪙** !")
             return
 
-        # Animation frames
         msg = await interaction.followup.send("🎲 Lancement des dés...")
         await asyncio.sleep(0.5)
         await msg.edit(content="🎲 Les dés roulent... ⏳")
@@ -337,7 +335,6 @@ class Casino(commands.Cog):
             await interaction.followup.send(f"❌ Tu n'as que **{data['coins']} 🪙** !")
             return
 
-        # Animation deal
         msg = await interaction.followup.send("🃏 Distribution des cartes...")
         await asyncio.sleep(0.6)
         await msg.edit(content="🃏 Mélange du sabot... 🔀")
@@ -346,7 +343,6 @@ class Casino(commands.Cog):
         main_joueur = [nouvelle_carte(), nouvelle_carte()]
         main_croupier = [nouvelle_carte(), nouvelle_carte()]
 
-        # Blackjack naturel
         if valeur_main(main_joueur) == 21:
             gain = int(mise * 1.5)
             data["coins"] += gain
@@ -406,7 +402,6 @@ class Casino(commands.Cog):
         losses = stats.get("losses", 0)
         ratio = round((wins / games) * 100, 1) if games > 0 else 0
 
-        # Saison
         saison = data.get("saison_blackjack", {})
         s_games = saison.get("games", 0)
         s_wins = saison.get("wins", 0)
@@ -431,7 +426,7 @@ class Casino(commands.Cog):
     # ────────────────────────────────────────────────────────
     # /gacha-duel
     # ────────────────────────────────────────────────────────
-    @app_commands.command(name="gacha-duel", description="⚔️ Défie un membre en duel (25–500 🪙)")
+    @app_commands.command(name="gacha-duel", description="⚔️ Défie un membre en duel de cartes (25–500 🪙)")
     @app_commands.describe(
         adversaire="Le membre que tu veux défier",
         mise="Montant à miser (25 à 500 🪙)"
@@ -464,9 +459,17 @@ class Casino(commands.Cog):
             await interaction.followup.send(f"❌ {adversaire.display_name} n'a que **{data_a['coins']} 🪙** !")
             return
 
-        # Challenge embed
+        cartes_c = data_c.get("cartes", [])
+        cartes_a = data_a.get("cartes", [])
+        if not cartes_c:
+            await interaction.followup.send("❌ Tu n'as aucune carte ! Fais `/cardspin` d'abord.")
+            return
+        if not cartes_a:
+            await interaction.followup.send(f"❌ {adversaire.display_name} n'a aucune carte !")
+            return
+
         embed_challenge = discord.Embed(
-            title="⚔️ DUEL CASINO",
+            title="⚔️ DUEL DE CARTES",
             description=f"{interaction.user.mention} défie {adversaire.mention} !\n💰 **Pot : {mise * 2} 🪙**",
             color=0xf1c40f
         )
@@ -487,31 +490,44 @@ class Casino(commands.Cog):
             await msg.edit(embed=embed_refuse, view=view)
             return
 
-        # Animation duel
-        await msg.edit(content="⚔️ Duel en cours...", embed=None, view=None)
-        await asyncio.sleep(0.5)
-        await msg.edit(content="🎲 Tirage des scores...")
+        ORDRE_RARETE = ["shlag", "commun", "rare", "epique", "hallal", "legendaire", "mythique", "secret"]
+        RARETE_INFO = {
+            "shlag":      {"emoji": "⚫", "label": "Shlag",      "couleur": 0x2C2C2C},
+            "commun":     {"emoji": "⚪", "label": "Commun",     "couleur": 0xAAAAAA},
+            "rare":       {"emoji": "🔵", "label": "Rare",       "couleur": 0x3498DB},
+            "epique":     {"emoji": "🟣", "label": "Épique",     "couleur": 0x9B59B6},
+            "hallal":     {"emoji": "🟢", "label": "Hallal",     "couleur": 0x2ECC71},
+            "legendaire": {"emoji": "🟡", "label": "Légendaire", "couleur": 0xF1C40F},
+            "mythique":   {"emoji": "🔴", "label": "Mythique",   "couleur": 0xFF4500},
+            "secret":     {"emoji": "🌈", "label": "✨ Secret",  "couleur": 0xFF1493},
+        }
+
+        await msg.edit(content="🎴 Tirage des cartes en cours...", embed=None, view=None)
+        await asyncio.sleep(0.8)
+        await msg.edit(content="🎴 Les cartes sont révélées...")
         await asyncio.sleep(0.8)
 
-        score_c = random.randint(1, 100)
-        score_a = random.randint(1, 100)
-        while score_c == score_a:
-            score_c = random.randint(1, 100)
-            score_a = random.randint(1, 100)
+        carte_c = random.choice(cartes_c)
+        carte_a = random.choice(cartes_a)
 
-        if score_c > score_a:
-            gagnant, perdant = interaction.user, adversaire
+        puissance_c = ORDRE_RARETE.index(carte_c["rarete"]) if carte_c["rarete"] in ORDRE_RARETE else 0
+        puissance_a = ORDRE_RARETE.index(carte_a["rarete"]) if carte_a["rarete"] in ORDRE_RARETE else 0
+
+        if puissance_c == puissance_a:
+            gagnant_id = random.choice([interaction.user.id, adversaire.id])
+        else:
+            gagnant_id = interaction.user.id if puissance_c > puissance_a else adversaire.id
+
+        gagnant = interaction.user if gagnant_id == interaction.user.id else adversaire
+
+        if gagnant_id == interaction.user.id:
             data_c["coins"] += mise
             data_a["coins"] -= mise
-            stats_g, stats_p = data_c, data_a
         else:
-            gagnant, perdant = adversaire, interaction.user
             data_a["coins"] += mise
             data_c["coins"] -= mise
-            stats_g, stats_p = data_a, data_c
 
-        # Stats duel
-        for d, result in [(data_c, score_c > score_a), (data_a, score_a > score_c)]:
+        for d, result in [(data_c, gagnant_id == interaction.user.id), (data_a, gagnant_id == adversaire.id)]:
             ds = d.setdefault("duel_stats", {})
             ds["games"] = ds.get("games", 0) + 1
             if result:
@@ -522,20 +538,30 @@ class Casino(commands.Cog):
 
         save_db(db)
 
-        embed_result = discord.Embed(title="⚔️ Résultat du Duel !", color=0xf1c40f)
+        info_c = RARETE_INFO.get(carte_c["rarete"], {"emoji": "❓", "label": carte_c["rarete"], "couleur": 0x95a5a6})
+        info_a = RARETE_INFO.get(carte_a["rarete"], {"emoji": "❓", "label": carte_a["rarete"], "couleur": 0x95a5a6})
+        couleur_embed = RARETE_INFO.get(
+            carte_c["rarete"] if gagnant_id == interaction.user.id else carte_a["rarete"],
+            {}
+        ).get("couleur", 0xf1c40f)
+
+        egalite_txt = "\n*Égalité de rareté — victoire aléatoire !*" if puissance_c == puissance_a else ""
+
+        embed_result = discord.Embed(title="⚔️ Résultat du Duel de Cartes !", color=couleur_embed)
         embed_result.add_field(
             name=f"🗡️ {interaction.user.display_name}",
-            value=f"Score : **{score_c}**",
+            value=f"{info_c['emoji']} **{carte_c['nom']}**\n*{info_c['label']}*",
             inline=True
         )
+        embed_result.add_field(name="⚔️", value="VS", inline=True)
         embed_result.add_field(
             name=f"🛡️ {adversaire.display_name}",
-            value=f"Score : **{score_a}**",
+            value=f"{info_a['emoji']} **{carte_a['nom']}**\n*{info_a['label']}*",
             inline=True
         )
         embed_result.add_field(
             name="🏆 Gagnant",
-            value=f"{gagnant.mention} remporte **{mise * 2} 🪙** !",
+            value=f"{gagnant.mention} remporte **{mise * 2} 🪙** !{egalite_txt}",
             inline=False
         )
         embed_result.set_footer(text=f"Mise : {mise} 🪙 chacun")
@@ -607,7 +633,6 @@ class Casino(commands.Cog):
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-        # Annonce publique
         for channel in interaction.guild.text_channels:
             if "casino" in channel.name.lower():
                 await channel.send(embed=discord.Embed(
@@ -617,6 +642,9 @@ class Casino(commands.Cog):
                 ))
                 break
 
+    # ────────────────────────────────────────────────────────
+    # /casino-help
+    # ────────────────────────────────────────────────────────
     @app_commands.command(name="casino-help", description="📖 Guide complet des jeux du casino")
     async def casino_help(self, interaction: discord.Interaction):
         embed = discord.Embed(
@@ -634,7 +662,8 @@ class Casino(commands.Cog):
                 "✅ **Hit** → Tirer une carte\n"
                 "❌ **Stand** → Rester sur sa main\n"
                 "⚡ **Double** → Doubler la mise + 1 carte\n"
-                "🌟 **Blackjack naturel** (As + 10) = gain x1.5"
+                "🌟 **Blackjack naturel** (As + figure) = gain ×1.5\n"
+                "🤖 Le croupier tire jusqu'à 17 minimum"
             ),
             inline=False
         )
@@ -649,11 +678,13 @@ class Casino(commands.Cog):
             inline=False
         )
         embed.add_field(
-            name="⚔️ Gacha Duel — PVP",
+            name="⚔️ Duel de Cartes — PVP",
             value=(
                 "`/gacha-duel [@membre] [mise]` — Mise : **25–500** 🪙\n\n"
-                "**But :** Défier un autre membre. Chacun obtient un score aléatoire.\n"
-                "Le score le plus élevé remporte le pot entier (**mise x2**).\n"
+                "**But :** Défier un autre membre. Chacun tire une carte aléatoire de sa collection.\n"
+                "La carte de **rareté la plus haute** remporte le pot (**mise ×2**).\n"
+                "Ordre : ⚫Shlag < ⚪Commun < 🔵Rare < 🟣Épique < 🟢Hallal < 🟡Légendaire < 🔴Mythique < 🌈Secret\n"
+                "⚠️ En cas d'égalité de rareté → victoire aléatoire !\n"
                 "Le défié a **30 secondes** pour accepter ou refuser."
             ),
             inline=False
@@ -667,20 +698,22 @@ class Casino(commands.Cog):
             inline=False
         )
         embed.add_field(
-            name="🎖️ Rôles Débloquables",
+            name="🎖️ Rôles Débloquables (automatiques)",
             value=(
                 "**🃏 Card Shark** — 60%+ winrate blackjack (10 parties min)\n"
                 "**🎰 Pro Gambler** — 100 parties de blackjack\n"
-                "**💎 High Roller** — 5 000+ 🪙 de gains"
+                "**💎 High Roller** — 5 000+ 🪙 en solde\n"
+                "*Les rôles sont créés et attribués automatiquement !*"
             ),
             inline=False
         )
         embed.set_footer(text="🍀 Bonne chance ! Joue dans #・casino uniquement.")
         await interaction.response.send_message(embed=embed)
-    
+
+
 # ============================================================
 # SETUP
 # ============================================================
-    
+
 async def setup(bot):
     await bot.add_cog(Casino(bot))

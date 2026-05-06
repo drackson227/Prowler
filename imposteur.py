@@ -7,7 +7,7 @@ import json
 import os
 from datetime import datetime, timezone
 
-DB_IMPOSTEUR = "/data/imposteur.json"
+DB_IMPOSTEUR = "/tmp/imposteur.json"
 
 def load_imp_db():
     if os.path.exists(DB_IMPOSTEUR):

@@ -911,4 +911,5 @@ async def on_message(message):
     exact, similar, is_id, is_banned = await find_member(message.guild, action_data.get("target", ""), message.channel)
     await handle_member_resolution(message.channel, action_data, message.author.id, exact, similar, is_id, is_banned)
 
+client.setup_hook = setup_hook
 client.run(DISCORD_TOKEN)

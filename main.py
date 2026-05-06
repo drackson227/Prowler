@@ -911,8 +911,20 @@ async def on_message(message):
     exact, similar, is_id, is_banned = await find_member(message.guild, action_data.get("target", ""), message.channel)
     await handle_member_resolution(message.channel, action_data, message.author.id, exact, similar, is_id, is_banned)
 
-@client.event
 async def setup_hook():
+    for ext in ["cards", "trades", "voc", "tickets", "casino", "imposteur"]:
+        try:
+            await client.load_extension(ext)
+            print(f"✅ Extension {ext} chargée")
+        except Exception as e:
+            print(f"❌ Erreur chargement {ext} : {e}")
+    try:
+        synced = await client.tree.sync()
+        print(f"✅ {len(synced)} slash commands synchronisées")
+    except Exception as e:
+        print(f"❌ Erreur sync : {e}")
+
+client.setup_hook = setup_hook
     for ext in ["cards", "trades", "voc", "tickets", "casino", "imposteur"]:
         try:
             await client.load_extension(ext)

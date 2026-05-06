@@ -946,6 +946,14 @@ async def setup_hook():
     except Exception as e:
         print(f"❌ Erreur sync : {e}")
 
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+def run_server():
+    HTTPServer(("0.0.0.0", 8080), BaseHTTPRequestHandler).serve_forever()
+
+threading.Thread(target=run_server, daemon=True).start()
+
 client.setup_hook = setup_hook
 
 client.run(DISCORD_TOKEN)

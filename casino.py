@@ -171,14 +171,22 @@ class BlackjackView(discord.ui.View):
         if role_name:
             guild = interaction.guild
             role = discord.utils.get(guild.roles, name=role_name)
-            if role:
-                member = guild.get_member(self.joueur_id)
-                if member and role not in member.roles:
-                    try:
-                        await member.add_roles(role)
-                        await interaction.channel.send(f"🎖️ {member.mention} a débloqué le rôle **{role_name}** !")
-                    except Exception:
-                        pass
+            if not role:
+                try:
+                    role = await guild.create_role(
+                        name=role_name,
+                        color=discord.Color.gold(),
+                        reason="Rôle casino créé automatiquement"
+                    )
+                except Exception:
+                    return
+            member = guild.get_member(self.joueur_id)
+            if member and role not in member.roles:
+                try:
+                    await member.add_roles(role)
+                    await interaction.channel.send(f"🎖️ {member.mention} a débloqué le rôle **{role_name}** !")
+                except Exception:
+                    pass
 
     @discord.ui.button(label="✅ Hit", style=discord.ButtonStyle.green)
     async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):

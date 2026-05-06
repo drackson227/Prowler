@@ -245,7 +245,7 @@ async def send_help(channel):
             "`/gacha-duel @adversaire [mise]` — ⚔️ Duel Gacha (25–500 🪙)\n"
             "`/top-duel` — 🏆 Leaderboard duels"
         )
-    elif "moderation" in channel_name or "modération" in channel_name:
+    elif "moderation" in channel_name:
         embed.title = "📖 Commandes — Modération"
         embed.description = (
             "Écris en **langage naturel** :\n"
@@ -256,11 +256,11 @@ async def send_help(channel):
             "**Commandes spéciales :**\n"
             "`!give @membre 500` — donner pièces (Fondateur)\n"
             "`!give @membre role NomDuRole` — donner rôle (Fondateur)\n"
-            "`!give @membre carte NomDeLaCarte` — donner carte (Fondateur)\n"
             "`!shadowban @membre` — shadow-ban silencieux\n"
-            "`!shadowunban @membre` — lever le shadow-ban\n"
-            "`!tradecancel @membre` — débloquer un trade coincé\n"
-            "`!unlockserver` — déverrouiller après un raid"
+            "`!shadowunban @membre` — lever le shadow-ban\n\n"
+            "🎮 **Imposteur** (salon privé requis) :\n"
+            "`/imposteur` — uniquement dans un **salon textuel privé**\n"
+            "→ Crée d'abord ton salon avec `/createvoc NomDuSalon`"
         )
     else:
         embed.title = "📖 Aide — Prowler Bot"

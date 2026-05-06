@@ -925,16 +925,5 @@ async def setup_hook():
         print(f"❌ Erreur sync : {e}")
 
 client.setup_hook = setup_hook
-    for ext in ["cards", "trades", "voc", "tickets", "casino", "imposteur"]:
-        try:
-            await client.load_extension(ext)
-            print(f"✅ Extension {ext} chargée")
-        except Exception as e:
-            print(f"❌ Erreur chargement {ext} : {e}")
-    try:
-        synced = await client.tree.sync()
-        print(f"✅ {len(synced)} slash commands synchronisées")
-    except Exception as e:
-        print(f"❌ Erreur sync : {e}")
 
 client.run(DISCORD_TOKEN)

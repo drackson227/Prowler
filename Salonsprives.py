@@ -12,7 +12,7 @@ from db import load_db, save_db, get_member_data
 
 # ── Config ────────────────────────────────────────────────────────────────────
 CATEGORY_NAME = "Salons Privés"
-SALONS_FILE = "/data/salons_prives.json"
+SALONS_FILE = "/tmp/salons_prives.json"
 
 # ── Persistance ───────────────────────────────────────────────────────────────
 def load_salons():

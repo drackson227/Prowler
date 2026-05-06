@@ -39,13 +39,151 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.reactions = True
+intents.voice_states = True  # ← AJOUT pour voice coins
 
 client = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 member_message_days = {}
 
+# ── VOICE COINS ──────────────────────────────────────────────────────────────
+voice_timers = {}       # user_id: asyncio.Task
+voice_start_time = {}   # user_id: datetime
+VOICE_COINS_PER_MINUTE = 2
+VOICE_XP_PER_MINUTE = 0  # Optionnel, 0 = désactivé
+
+# ── SHADOW BAN ────────────────────────────────────────────────────────────────
+shadow_banned = {}  # user_id: {"since": datetime, "blocked": int, "spam_score": int}
+
 def normalize_name(s):
     s = s.lower().replace("・", "")
     return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("ascii")
+
+# ============================================================
+# VOICE COINS — 1 min vocal = 2 🪙
+# ============================================================
+async def voice_coins_loop(member):
+    """Distribue des pièces toutes les minutes passées en vocal."""
+    while True:
+        await asyncio.sleep(60)
+        if member.voice and not member.voice.self_mute and not member.voice.self_deaf:
+            await add_xp_and_coins(member, member.guild, VOICE_XP_PER_MINUTE, VOICE_COINS_PER_MINUTE)
+        elif not member.voice:
+            break
+
+@client.event
+async def on_voice_state_update(member, before, after):
+    if member.bot:
+        return
+    uid = member.id
+
+    # Rejoint un salon vocal
+    if after.channel and (not before.channel or before.channel != after.channel):
+        voice_start_time[uid] = datetime.now(timezone.utc)
+        if uid in voice_timers:
+            voice_timers[uid].cancel()
+        voice_timers[uid] = asyncio.create_task(voice_coins_loop(member))
+
+    # Quitte un salon vocal
+    elif before.channel and (not after.channel or after.channel != before.channel):
+        if uid in voice_timers:
+            voice_timers[uid].cancel()
+            del voice_timers[uid]
+        if uid in voice_start_time:
+            duree_min = (datetime.now(timezone.utc) - voice_start_time[uid]).total_seconds() / 60
+            coins = int(duree_min * VOICE_COINS_PER_MINUTE)
+            if coins > 0:
+                await add_xp_and_coins(member, member.guild, 0, coins)
+                try:
+                    await member.send(f"🎤 **+{coins} 🪙** pour **{int(duree_min)} min** passées en vocal !")
+                except Exception:
+                    pass
+            del voice_start_time[uid]
+
+# ============================================================
+# SHADOW BAN
+# ============================================================
+async def shadow_ban_user(guild, moderator, target):
+    """Shadow-banne un membre — lui seul croit que ses messages passent."""
+    db = load_db()
+    data = get_member_data(db, target.id)
+    data["shadow_banned"] = True
+    data["shadow_ban_since"] = datetime.now(timezone.utc).isoformat()
+    data["shadow_ban_count"] = data.get("shadow_ban_count", 0) + 1
+    save_db(db)
+    shadow_banned[target.id] = {"since": datetime.now(timezone.utc), "blocked": 0, "spam_score": 0}
+
+    report_ch = get_channel_by_name(guild, "rapport-prowler")
+    if report_ch:
+        embed = discord.Embed(title="🕵️ SHADOW MODE ACTIF", color=0x2C2C2C,
+                               timestamp=datetime.now(timezone.utc))
+        embed.add_field(name="👤 Cible", value=f"{target.mention} [SHADOW #{data['shadow_ban_count']}]", inline=True)
+        embed.add_field(name="👮 Moderateur", value=moderator.mention, inline=True)
+        embed.add_field(name="📊 Statut", value="0 msg bloqués | Score spam 0%", inline=False)
+        embed.add_field(name="Actions", value="👁️ Reveal (shadow-unban) • ❌ Permaban", inline=False)
+        msg = await report_ch.send(embed=embed)
+        await msg.add_reaction("👁️")
+        await msg.add_reaction("❌")
+
+async def shadow_unban_user(guild, target_id):
+    db = load_db()
+    data = get_member_data(db, target_id)
+    data["shadow_banned"] = False
+    save_db(db)
+    shadow_banned.pop(target_id, None)
+
+# ============================================================
+# AUTO-APPEAL IA
+# ============================================================
+async def auto_appeal_check(guild, banned_user):
+    """Analyse automatique IA pour les bans et envoie un embed aux modos."""
+    db = load_db()
+    data = db.get(str(banned_user.id), {})
+    sanctions = data.get("sanctions", [])
+    total_warns = data.get("total_warns", 0)
+    total_messages = data.get("total_messages", 0)
+    bans_count = data.get("bans", 0)
+
+    # Score IA simplifié (logique locale, pas d'appel API)
+    score_injuste = 100
+    if total_warns > 3: score_injuste -= 20
+    if total_warns > 6: score_injuste -= 20
+    if bans_count > 1: score_injuste -= 30
+    recent_sanctions = [s for s in sanctions if s.get("type") in ["spam_mute", "mute"]]
+    if len(recent_sanctions) > 2: score_injuste -= 15
+    score_injuste = max(10, min(95, score_injuste))
+
+    recommandation = "Unban + surveillance" if score_injuste >= 60 else "Maintenir le ban"
+    couleur = 0x2ECC71 if score_injuste >= 60 else 0xE74C3C
+
+    # DM à l'utilisateur banni
+    try:
+        await banned_user.send(
+            f"🤖 **Auto-Appeal Prowler Bot**\n\n"
+            f"Ton ban a été analysé automatiquement.\n"
+            f"📊 **Score IA : {score_injuste}% potentiellement injuste**\n"
+            f"Une révision par les modérateurs est en cours.\n"
+            f"Résultat dans **3h** maximum."
+        )
+    except Exception:
+        pass
+
+    report_ch = get_channel_by_name(guild, "rapport-prowler")
+    if not report_ch:
+        return
+
+    embed = discord.Embed(title="🤖 AUTO-APPEAL", color=couleur,
+                           timestamp=datetime.now(timezone.utc))
+    embed.set_thumbnail(url=banned_user.display_avatar.url)
+    embed.add_field(name="👤 Utilisateur", value=f"{banned_user} (ID: {banned_user.id})", inline=True)
+    embed.add_field(name="📊 Score IA", value=f"**{score_injuste}% injuste**", inline=True)
+    embed.add_field(name="📝 Historique",
+                    value=f"⚠️ Warns : {total_warns} | 🔇 Mutes : {len(recent_sanctions)} | 🔨 Bans : {bans_count}",
+                    inline=False)
+    embed.add_field(name="✅ Recommandation", value=recommandation, inline=False)
+    embed.set_footer(text="✅ Unban • ❌ Refuser • ℹ️ Profil")
+    msg = await report_ch.send(embed=embed)
+    await msg.add_reaction("✅")
+    await msg.add_reaction("❌")
+    await msg.add_reaction("ℹ️")
 
 # ============================================================
 # HELP
@@ -89,10 +227,22 @@ async def send_help(channel):
     elif "trades" in channel_name:
         embed.title = "📖 Commandes — 🔄・trades"
         embed.description = (
-            "`!trade @membre` / `/trade` — trade interactif\n"
+            "`!trade @membre` / `/trade` — trade interactif (salon privé)\n"
             "`!trade @membre give X contre Y` — trade rapide\n"
             "`!donner @membre 500` / `/donner` — donner des pièces\n"
             "`!collection` / `/collection` — ta collection de cartes"
+        )
+    elif "casino" in channel_name:
+        embed.title = "📖 Commandes — 🎰・casino"
+        embed.description = (
+            "`/blackjack-low [mise]` — Table Low (10–100 🪙)\n"
+            "`/blackjack-high [mise]` — Table High (500–5k 🪙)\n"
+            "`/blackjack-vip [mise]` — VIP Modos (10k+ 🪙)\n"
+            "`/blackjack-stats` — Tes stats Blackjack\n\n"
+            "`/dice [mise]` — 🎲 Double ou rien (10–1000 🪙)\n"
+            "`/mystats` — Tes stats Dice\n\n"
+            "`/gacha-duel @adversaire [mise]` — ⚔️ Duel Gacha (25–500 🪙)\n"
+            "`/top-duel` — 🏆 Leaderboard duels"
         )
     elif "moderation" in channel_name or "modération" in channel_name:
         embed.title = "📖 Commandes — Modération"
@@ -106,6 +256,8 @@ async def send_help(channel):
             "`!give @membre 500` — donner pièces (Fondateur)\n"
             "`!give @membre role NomDuRole` — donner rôle (Fondateur)\n"
             "`!give @membre carte NomDeLaCarte` — donner carte (Fondateur)\n"
+            "`!shadowban @membre` — shadow-ban silencieux\n"
+            "`!shadowunban @membre` — lever le shadow-ban\n"
             "`!tradecancel @membre` — débloquer un trade coincé\n"
             "`!unlockserver` — déverrouiller après un raid"
         )
@@ -116,8 +268,11 @@ async def send_help(channel):
             "🛍️・boutique — `/boutique`, `/rolespin`, `/cardspin`\n"
             "🎁・daily — `/daily`\n"
             "🔄・trades — `/trade`, `/donner`\n"
+            "🎰・casino — `/blackjack-low`, `/dice`, `/gacha-duel`\n"
+            "🎮 Imposteur — `/imposteur`\n"
             "🎙️ Vocal — `/createvoc NomDuSalon`\n\n"
-            "Tape `?help` dans chaque salon pour les commandes détaillées."
+            "Tape `?help` dans chaque salon pour les commandes détaillées.\n"
+            "🎤 **+2 🪙/min** en vocal automatiquement !"
         )
     embed.set_footer(text="Prowler Bot • ! et / sont tous les deux acceptés")
     await channel.send(embed=embed)
@@ -173,7 +328,6 @@ async def slash_classement(interaction: discord.Interaction):
 @client.tree.command(name="inventaire", description="Affiche ton inventaire de rôles")
 async def slash_inventaire(interaction: discord.Interaction):
     await interaction.response.defer()
-    # Réutilise cmd_inventaire via un faux message
     class FakeMsg:
         author = interaction.user
         guild = interaction.guild
@@ -302,6 +456,12 @@ async def send_daily_report(guild):
         cmd_counts = Counter(f"{mod} → {act}" for _, mod, act, _ in today_cmds)
         cmd_txt = "\n".join([f"• **{k}** × {v}" for k, v in cmd_counts.most_common(10)])
         embed.add_field(name=f"🖱️ Actions modos ({len(today_cmds)})", value=cmd_txt, inline=False)
+
+    # Shadow bans actifs
+    if shadow_banned:
+        sb_txt = "\n".join([f"• ID:{uid} — {v['blocked']} msgs bloqués" for uid, v in list(shadow_banned.items())[:5]])
+        embed.add_field(name=f"🕵️ Shadow bans actifs ({len(shadow_banned)})", value=sb_txt, inline=False)
+
     embed.set_footer(text="Rapport automatique quotidien")
     await report_ch.send(embed=embed)
 
@@ -391,8 +551,7 @@ async def update_active_roles_loop():
 async def on_ready():
     print(f"✅ {client.user} connecté !")
 
-    # Chargement des extensions
-    extensions = ["cards", "trades", "voc", "tickets"]
+    extensions = ["cards", "trades", "voc", "tickets", "casino", "imposteur"]
     for ext in extensions:
         try:
             await client.load_extension(ext)
@@ -400,14 +559,12 @@ async def on_ready():
         except Exception as e:
             print(f"❌ Erreur chargement {ext} : {e}")
 
-    # Sync des slash commands
     try:
         synced = await client.tree.sync()
         print(f"✅ {len(synced)} slash commands synchronisées")
     except Exception as e:
         print(f"❌ Erreur sync slash commands : {e}")
 
-    # Démarrage des loops
     client.loop.create_task(daily_report_loop())
     client.loop.create_task(update_active_roles_loop())
     client.loop.create_task(shop_rotate_loop())
@@ -429,10 +586,52 @@ async def on_member_remove(member):
     await log_action(member.guild, "leave", None, member)
 
 @client.event
+async def on_member_ban(guild, user):
+    """Déclenche l'auto-appeal IA lors d'un ban."""
+    await asyncio.sleep(2)  # Laisse le temps à Discord de processer
+    await auto_appeal_check(guild, user)
+
+@client.event
 async def on_reaction_add(reaction, user):
     if user.bot:
         return
     msg_id = reaction.message.id
+
+    # ── Réactions Auto-Appeal ────────────────────────────────────────────────
+    embed = reaction.message.embeds[0] if reaction.message.embeds else None
+    if embed and "AUTO-APPEAL" in (embed.title or ""):
+        if not has_permission(reaction.message.guild.get_member(user.id)):
+            return
+        # Extrait l'ID depuis le footer ou le champ
+        for field in embed.fields:
+            if "ID:" in field.value:
+                try:
+                    uid = int(field.value.split("ID: ")[1].rstrip(")"))
+                    if str(reaction.emoji) == "✅":
+                        try:
+                            await reaction.message.guild.unban(discord.Object(id=uid), reason="Auto-appeal IA approuvé")
+                            await reaction.message.channel.send(f"✅ Utilisateur (ID: {uid}) débanni suite à l'auto-appeal.")
+                        except Exception as e:
+                            await reaction.message.channel.send(f"❌ Erreur unban : {e}")
+                    elif str(reaction.emoji) == "❌":
+                        await reaction.message.channel.send(f"❌ Appeal refusé pour ID: {uid}.")
+                except Exception:
+                    pass
+                break
+
+    # ── Réactions Shadow Ban ─────────────────────────────────────────────────
+    if embed and "SHADOW MODE" in (embed.title or ""):
+        if not has_permission(reaction.message.guild.get_member(user.id)):
+            return
+        if str(reaction.emoji) == "👁️":
+            # Lever le shadow ban
+            for field in embed.fields:
+                if "[SHADOW" in field.value:
+                    try:
+                        mention = field.value.split(" ")[0]
+                        # On ne peut pas facilement extraire l'ID depuis la mention ici
+                        await reaction.message.channel.send("✅ Shadow-unban : utilise `!shadowunban @membre`.")
+                    except: pass
 
     if msg_id in waiting_for_action_choice:
         choice_type, member, action_data, requester_id = waiting_for_action_choice[msg_id]
@@ -554,6 +753,19 @@ async def on_message(message):
     if message.author.bot:
         return
 
+    # ── Shadow Ban : supprime les messages silencieusement ───────────────────
+    if message.author.id in shadow_banned:
+        sb = shadow_banned[message.author.id]
+        sb["blocked"] = sb.get("blocked", 0) + 1
+        # Calcul score spam
+        sb["spam_score"] = min(99, int(sb["blocked"] / max(1, (datetime.now(timezone.utc) - sb["since"]).total_seconds() / 3600) * 10))
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        # Mise à jour embed dans rapport-prowler
+        return  # Ne process PAS les commandes pour les shadow-bannés
+
     await client.process_commands(message)
 
     channel_name = normalize_name(message.channel.name)
@@ -566,6 +778,10 @@ async def on_message(message):
     if mid not in member_message_days:
         member_message_days[mid] = {}
     member_message_days[mid][today] = member_message_days[mid].get(today, 0) + 1
+
+    # Anti RAM-leak : nettoie si trop gros
+    if len(member_message_days) > 5000:
+        member_message_days.clear()
 
     # XP & pièces
     is_boosted = update_boost(message.author.id)
@@ -609,6 +825,27 @@ async def on_message(message):
 
     if content_lower.startswith("!give"):
         await cmd_give(message, content[5:].strip())
+        return
+
+    # ── Shadow ban commands ───────────────────────────────────────────────────
+    if content_lower.startswith("!shadowban"):
+        if not any(r.name in ["Modérateur", "Fondateur"] for r in message.author.roles):
+            await message.channel.send("❌ Réservé aux modérateurs.")
+            return
+        if message.mentions:
+            target = message.mentions[0]
+            await shadow_ban_user(message.guild, message.author, target)
+            await message.channel.send(f"🕵️ **{target.display_name}** est maintenant shadow-banni. Rapport dans #rapport-prowler.")
+        return
+
+    if content_lower.startswith("!shadowunban"):
+        if not any(r.name in ["Modérateur", "Fondateur"] for r in message.author.roles):
+            await message.channel.send("❌ Réservé aux modérateurs.")
+            return
+        if message.mentions:
+            target = message.mentions[0]
+            await shadow_unban_user(message.guild, target.id)
+            await message.channel.send(f"✅ **{target.display_name}** n'est plus shadow-banni.")
         return
 
     if message.author.id in waiting_for_comment:

@@ -359,6 +359,10 @@ async def slash_classement(interaction: discord.Interaction):
     embed = discord.Embed(title="🏆 Classement — Top 10", description="\n".join(lines) if lines else "Aucun membre.", color=0xf1c40f)
     await interaction.followup.send(embed=embed)
 
+# ── BUG FIX #1 : slash_daily, slash_rolespin, slash_boutique, slash_acheter, slash_equiper
+# Le FakeMsg ne répondait jamais à l'interaction → "L'application ne répond plus"
+# Solution : envoyer la réponse via interaction.followup après avoir récupéré le résultat
+
 @client.tree.command(name="daily", description="Récupère ta récompense quotidienne")
 async def slash_daily(interaction: discord.Interaction):
     await interaction.response.defer()
@@ -367,6 +371,8 @@ async def slash_daily(interaction: discord.Interaction):
         guild = interaction.guild
         channel = interaction.channel
         mentions = []
+        async def reply(self, *args, **kwargs):
+            await interaction.followup.send(*args, **kwargs)
     await cmd_daily(FakeMsg())
 
 @client.tree.command(name="rolespin", description="Lance le gacha de rôles (50 🪙)")
@@ -377,6 +383,8 @@ async def slash_rolespin(interaction: discord.Interaction):
         guild = interaction.guild
         channel = interaction.channel
         mentions = []
+        async def reply(self, *args, **kwargs):
+            await interaction.followup.send(*args, **kwargs)
     await cmd_spin(FakeMsg())
 
 @client.tree.command(name="boutique", description="Affiche la boutique")
@@ -387,6 +395,8 @@ async def slash_boutique(interaction: discord.Interaction):
         guild = interaction.guild
         channel = interaction.channel
         mentions = []
+        async def reply(self, *args, **kwargs):
+            await interaction.followup.send(*args, **kwargs)
     await cmd_boutique(FakeMsg())
 
 @client.tree.command(name="acheter", description="Achète un article de la boutique")
@@ -398,6 +408,8 @@ async def slash_acheter(interaction: discord.Interaction, article: str):
         guild = interaction.guild
         channel = interaction.channel
         mentions = []
+        async def reply(self, *args, **kwargs):
+            await interaction.followup.send(*args, **kwargs)
     await cmd_acheter(FakeMsg(), article)
 
 @client.tree.command(name="equiper", description="Équipe un rôle cosmétique de ton inventaire")
@@ -409,6 +421,8 @@ async def slash_equiper(interaction: discord.Interaction, role: str):
         guild = interaction.guild
         channel = interaction.channel
         mentions = []
+        async def reply(self, *args, **kwargs):
+            await interaction.followup.send(*args, **kwargs)
     await cmd_equiper(FakeMsg(), role)
 
 @client.tree.command(name="notif", description="Active ou désactive les notifications de level up en MP")
@@ -430,6 +444,7 @@ async def slash_notif(interaction: discord.Interaction, etat: str):
 async def slash_help(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     await send_help(interaction.channel)
+    await interaction.followup.send("✅ Aide envoyée !", ephemeral=True)
 
 # ============================================================
 # RAPPORT QUOTIDIEN
@@ -573,8 +588,9 @@ async def on_ready():
     client.loop.create_task(daily_report_loop())
     client.loop.create_task(update_active_roles_loop())
     client.loop.create_task(shop_rotate_loop())
-    await bot.tree.sync()
-print("✅ Slash commands synchronisées")
+    # BUG FIX #2 : "await bot.tree.sync()" → supprimé (bot n'existe pas, double sync inutile)
+    # et le print était hors de la fonction (IndentationError silencieux)
+    print("✅ Bot prêt !")
 
 @client.event
 async def on_member_join(member):

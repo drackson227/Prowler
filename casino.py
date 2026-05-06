@@ -491,16 +491,15 @@ class Casino(commands.Cog):
             await msg.edit(embed=embed_refuse, view=view)
             return
 
-        ORDRE_RARETE = ["shlag", "commun", "rare", "epique", "hallal", "legendaire", "mythique", "secret"]
+        # Lu directement depuis cards.py — aucune modif nécessaire si tu ajoutes des raretés
+        ORDRE_RARETE = list(RARETES.keys())
         RARETE_INFO = {
-            "shlag":      {"emoji": "⚫", "label": "Shlag",      "couleur": 0x2C2C2C},
-            "commun":     {"emoji": "⚪", "label": "Commun",     "couleur": 0xAAAAAA},
-            "rare":       {"emoji": "🔵", "label": "Rare",       "couleur": 0x3498DB},
-            "epique":     {"emoji": "🟣", "label": "Épique",     "couleur": 0x9B59B6},
-            "hallal":     {"emoji": "🟢", "label": "Hallal",     "couleur": 0x2ECC71},
-            "legendaire": {"emoji": "🟡", "label": "Légendaire", "couleur": 0xF1C40F},
-            "mythique":   {"emoji": "🔴", "label": "Mythique",   "couleur": 0xFF4500},
-            "secret":     {"emoji": "🌈", "label": "✨ Secret",  "couleur": 0xFF1493},
+            k: {
+                "emoji":   v["emoji"],
+                "label":   v["label"],
+                "couleur": v["couleur"],
+            }
+            for k, v in RARETES.items()
         }
 
         # Animation spin style "gem feel"
